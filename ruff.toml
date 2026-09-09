@@ -1,0 +1,141 @@
+line-length = 88
+# show-fixes = true
+
+# Keep stable Ruff behavior.
+preview = false
+
+# Never apply unsafe fixes automatically.
+# You can still explicitly override this from the CLI when you really want to.
+unsafe-fixes = false
+
+
+[lint]
+extend-select = [
+    # -------------------------------------------------------------------------
+    # Imports
+    # -------------------------------------------------------------------------
+
+    # Sort, group, and de-duplicate imports.
+    "I",
+
+    # -------------------------------------------------------------------------
+    # Filesystem
+    # -------------------------------------------------------------------------
+
+    # Prefer pathlib over os.path, glob, builtin open(), etc.
+    "PTH",
+
+    # -------------------------------------------------------------------------
+    # Pytest
+    # -------------------------------------------------------------------------
+
+    "PT",
+
+    # -------------------------------------------------------------------------
+    # Docstrings
+    # -------------------------------------------------------------------------
+
+    # Docstrings are optional, but validate them when present.
+    "D",
+
+    # -------------------------------------------------------------------------
+    # Control-flow cleanup
+    # -------------------------------------------------------------------------
+
+    "RET504",  # Unnecessary assignment before return.
+    "RET505",  # Unnecessary else after return.
+    "RET506",  # Unnecessary else after raise.
+    "RET507",  # Unnecessary else after continue.
+    "RET508",  # Unnecessary else after break.
+
+    # -------------------------------------------------------------------------
+    # Simplifications
+    # -------------------------------------------------------------------------
+
+    "SIM109",  # Equality chain -> membership test.
+    "SIM300",  # Yoda conditions.
+    "SIM910",  # dict.get(key, None) -> dict.get(key).
+
+    # -------------------------------------------------------------------------
+    # Comprehensions / performance
+    # -------------------------------------------------------------------------
+
+    "PERF401",  # Manual list building -> comprehension.
+    "PERF403",  # Manual dict building -> comprehension.
+
+    # -------------------------------------------------------------------------
+    # Miscellaneous cleanup
+    # -------------------------------------------------------------------------
+
+    "PIE790",  # Unnecessary pass / ellipsis.
+
+    "RUF021",  # Parenthesize mixed `and` / `or`.
+    "RUF102",  # Invalid rule code in noqa.
+    "RUF103",  # Invalid noqa suppression.
+]
+
+
+ignore = [
+    # -------------------------------------------------------------------------
+    # Formatting is owned by `ruff format`
+    # -------------------------------------------------------------------------
+
+    "E501",
+
+    "D206",
+    "D300",
+
+    # -------------------------------------------------------------------------
+    # Docstrings are optional
+    # -------------------------------------------------------------------------
+
+    "D100",  # Missing module docstring.
+    "D101",  # Missing class docstring.
+    "D102",  # Missing method docstring.
+    "D103",  # Missing function docstring.
+    "D104",  # Missing package docstring.
+    "D105",  # Missing magic-method docstring.
+    "D106",  # Missing nested-class docstring.
+    "D107",  # Missing __init__ docstring.
+
+    # Don't require documentation for every parameter.
+    "D417",
+
+    # -------------------------------------------------------------------------
+    # Pytest — deliberately relaxed
+    # -------------------------------------------------------------------------
+
+    # Requiring match= for ValueError/OSError/etc. is often excessive.
+    "PT011",
+
+    # `from pytest import ...` is fine.
+    "PT013",
+
+    # Composite assertions can sometimes express intent more clearly.
+    "PT018",
+
+    # Allow side-effect fixtures to stay visible as test parameters.
+    "PT019",
+
+    # Don't require match= for broad warning classes.
+    "PT030",
+]
+
+
+# Report these, but never modify them automatically.
+#
+# This prevents fix-on-save from deleting code you're in the middle of writing.
+unfixable = [
+    "F401",   # Unused import.
+    "F841",   # Unused local variable.
+    "RUF059", # Unused unpacked variable.
+]
+
+
+[lint.pydocstyle]
+convention = "google"
+
+
+[format]
+docstring-code-format = true
+
