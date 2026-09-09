@@ -11,6 +11,8 @@ dependencies = [
     "cyclopts>=4",
     "mlflow>=3.16.0",
     "pydantic>=2",
+    "tensorboard>=2.21.0",
+    "tensorboardx>=2.6.5",
 ]
 
 [project.scripts]

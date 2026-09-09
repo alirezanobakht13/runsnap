@@ -28,3 +28,56 @@ patch with `EXP_TRACK_MAX_PATCH_BYTES` (10 MiB).
 
 **The patch carries uncommitted content of tracked files, so a secret in one is
 uploaded to the tracking server.** Ignored files are excluded.
+
+## TensorBoard
+
+Use `exp_track.tensorboard()` inside an active MLflow run to log TensorBoard
+events to its `tb/` artifacts. It exposes the `tensorboardX.SummaryWriter`
+methods and works independently of your training framework:
+
+```python
+import exp_track
+import mlflow
+import numpy as np
+
+mlflow.set_experiment("ablations")
+with exp_track.start_run(run_name="baseline") as run:
+    mlflow.log_param("optimizer", "adamw")
+    with exp_track.tensorboard() as writer:
+        for step in range(10):
+            writer.add_scalar("train/loss", 1.0 / (step + 1), step)
+        writer.add_text("notes", "Baseline run", 0)
+        writer.add_image("sample", np.zeros((3, 32, 32)), 0)
+        writer.add_histogram("weights", np.linspace(-1, 1, 100), 0)
+    print(run.info.run_id)
+```
+
+The writer uploads event files without copying scalars into MLflow metrics.
+Histograms default to 30 bins; pass `bins=` to override. Leaving the writer
+block flushes and uploads pending events, including on exceptions and Ctrl-C.
+
+Use the same `MLFLOW_TRACKING_URI` for logging and viewing (or pass
+`--tracking-uri` to the CLI):
+
+```bash
+exp-track tb baseline                        # run name or run id
+exp-track tb baseline ablation-nodropout      # compare named runs
+exp-track tb --experiment ablations
+exp-track tb --experiment ablations --filter "params.optimizer = 'adamw'"
+exp-track tb baseline --media                # include images and histograms
+```
+
+By default, the viewer fetches only the light event files containing scalars
+and text. `--media` also fetches images, histograms, and other media. Runs appear
+under their MLflow names; unchanged downloads are reused from a local cache.
+TensorBoard prints its URL and runs in the foreground until Ctrl-C. Each
+invocation fetches a snapshot; rerun the command to fetch newer uploads.
+
+During logging, the background thread waits 30 seconds between sync passes.
+Media rolls into shards after crossing 8 MiB; sealed shards become eligible for
+the next sync. An unannounced kill (`SIGKILL` or unhandled `SIGTERM`) keeps
+successfully uploaded data, but the open shard, pending sealed shards, and
+unsynced scalar updates can be lost. Slow or failed uploads extend this window,
+so neither 30 seconds nor one shard is a guaranteed loss bound. The size
+threshold is checked after writes, so a single large entry can exceed it.
+No signal handlers are installed.

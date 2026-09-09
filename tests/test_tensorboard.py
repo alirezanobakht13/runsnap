@@ -1,0 +1,332 @@
+"""Tests for the split, sharded TensorBoard writer."""
+
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+from mlflow.tracking import MlflowClient
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+import exp_track
+from exp_track._tags import (
+    TB_ARTIFACT_DIR,
+    TB_LIGHT_SUFFIX,
+    TB_MEDIA_SUFFIX,
+    TB_TAG_LOGDIR,
+)
+from exp_track._tensorboard import TensorBoardWriter
+
+
+def event_files(logdir: Path) -> list[Path]:
+    return sorted(logdir.glob("events.out.tfevents.*"))
+
+
+def media_files(logdir: Path) -> list[Path]:
+    return sorted(p for p in event_files(logdir) if TB_MEDIA_SUFFIX in p.name)
+
+
+def image(size: int = 64) -> np.ndarray:
+    """An incompressible image, so shard size tracks the number of writes."""
+    rng = np.random.default_rng(0)
+    return rng.integers(0, 255, size=(3, size, size), dtype=np.uint8)
+
+
+def accumulate(logdir: Path) -> EventAccumulator:
+    """Read a whole log directory back the way TensorBoard reads it."""
+    accumulator = EventAccumulator(str(logdir))
+    accumulator.Reload()
+    return accumulator
+
+
+@pytest.fixture
+def logdir(tmp_path: Path) -> Path:
+    path = tmp_path / "tb"
+    path.mkdir()
+    return path
+
+
+def test_scalars_and_media_land_in_different_files(logdir: Path):
+    writer = TensorBoardWriter(logdir)
+    writer.add_scalar("train/loss", 0.5, 1)
+    writer.add_image("train/sample", image(), 1)
+    writer.close()
+
+    light = [p for p in event_files(logdir) if p.name.endswith(TB_LIGHT_SUFFIX)]
+    media = media_files(logdir)
+    assert len(light) == 1
+    assert len(media) == 1
+    assert light[0].parent == media[0].parent
+
+    assert accumulate_tags(light[0])["scalars"] == ["train/loss"]
+    assert accumulate_tags(light[0])["images"] == []
+    assert accumulate_tags(media[0])["images"] == ["train/sample"]
+    assert accumulate_tags(media[0])["scalars"] == []
+
+
+def test_text_follows_scalars_and_other_methods_follow_media(logdir: Path):
+    writer = TensorBoardWriter(logdir)
+    writer.add_text("notes", "hello", 1)
+    writer.add_histogram("weights", np.arange(100.0), 1)
+    writer.close()
+
+    light = next(p for p in event_files(logdir) if p.name.endswith(TB_LIGHT_SUFFIX))
+    media = media_files(logdir)[0]
+
+    assert accumulate_tags(light)["tensors"] == ["notes/text_summary"]
+    assert accumulate_tags(media)["histograms"] == ["weights"]
+
+
+def accumulate_tags(event_file: Path) -> dict[str, list[str]]:
+    """The tags of a single event file, read in isolation from its siblings."""
+    accumulator = EventAccumulator(str(event_file))
+    accumulator.Reload()
+    return accumulator.Tags()
+
+
+def test_scalar_file_is_a_small_fraction_of_the_total(logdir: Path):
+    writer = TensorBoardWriter(logdir)
+    for step in range(20):
+        writer.add_scalar("train/loss", 1.0 / (step + 1), step)
+        writer.add_image("train/sample", image(), step)
+    writer.close()
+
+    light = next(p for p in event_files(logdir) if p.name.endswith(TB_LIGHT_SUFFIX))
+    total = sum(p.stat().st_size for p in event_files(logdir))
+    assert light.stat().st_size * 10 < total
+
+
+def test_histogram_default_bins_are_compact(logdir: Path):
+    values = np.random.default_rng(0).normal(size=10_000)
+
+    compact = TensorBoardWriter(logdir / "compact")
+    compact.add_histogram("weights", values, 1)
+    compact.close()
+
+    wide = TensorBoardWriter(logdir / "wide")
+    wide.add_histogram("weights", values, 1, bins="tensorflow")
+    wide.close()
+
+    compact_size = media_files(logdir / "compact")[0].stat().st_size
+    wide_size = media_files(logdir / "wide")[0].stat().st_size
+    assert compact_size * 4 < wide_size
+    assert accumulate_tags(media_files(logdir / "compact")[0])["histograms"] == [
+        "weights"
+    ]
+
+
+def test_histogram_bins_argument_is_passed_through(logdir: Path):
+    values = np.arange(1000.0)
+
+    writer = TensorBoardWriter(logdir)
+    writer.add_histogram("explicit", values, 1, bins=7)
+    writer.close()
+
+    accumulator = accumulate(logdir)
+    buckets = accumulator.Histograms("explicit")[0].histogram_value.bucket
+    # The writer prepends one empty bucket below the requested seven.
+    assert len(buckets) == 8
+    assert buckets[0] == 0
+    assert sum(buckets) == len(values)
+
+
+def test_media_rolls_into_distinctly_named_shards(logdir: Path):
+    writer = TensorBoardWriter(logdir, shard_max_bytes=16 * 1024)
+    for step in range(40):
+        writer.add_image("train/sample", image(), step)
+    writer.close()
+
+    shards = media_files(logdir)
+    assert len(shards) > 1
+    assert len({p.name for p in shards}) == len(shards)
+
+
+def test_shards_sealed_in_the_same_second_do_not_collide(logdir: Path):
+    writer = TensorBoardWriter(logdir, shard_max_bytes=1)
+    for step in range(6):
+        writer.flush()
+        writer.add_image("train/sample", image(16), step)
+    writer.close()
+
+    shards = media_files(logdir)
+    seconds = {p.name.split(".")[3] for p in shards}
+    assert len(shards) > len(seconds)
+    assert len({p.name for p in shards}) == len(shards)
+
+
+def test_interleaved_writing_reads_back_as_one_complete_run(logdir: Path):
+    writer = TensorBoardWriter(logdir, shard_max_bytes=16 * 1024)
+    for step in range(60):
+        writer.add_scalar("train/loss", 1.0 / (step + 1), step)
+        # Media steps run backwards against the scalars, so the two files'
+        # step numbers overlap and restart relative to each other.
+        writer.add_image("train/sample", image(), 60 - step)
+    writer.close()
+
+    assert len(media_files(logdir)) > 2
+
+    accumulator = accumulate(logdir)
+    assert accumulator.Tags()["scalars"] == ["train/loss"]
+    assert accumulator.Tags()["images"] == ["train/sample"]
+    points = accumulator.Scalars("train/loss")
+    assert [point.step for point in points] == list(range(60))
+
+
+def artifact_names(client, run_id: str) -> list[str]:
+    """The event files uploaded under a run's `tb/` artifact directory."""
+    infos = client.list_artifacts(run_id, TB_ARTIFACT_DIR)
+    return sorted(info.path.split("/")[-1] for info in infos)
+
+
+def uploaded_shards(client, run_id: str) -> list[str]:
+    """The media shards uploaded so far, sealed ones only."""
+    return [name for name in artifact_names(client, run_id) if TB_MEDIA_SUFFIX in name]
+
+
+def wait_for_shards(client, run_id: str, count: int, timeout: float = 20.0):
+    """Poll until `count` shards have been uploaded, so no sync tick is raced."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        shards = uploaded_shards(client, run_id)
+        if len(shards) >= count:
+            return shards
+        time.sleep(0.02)
+    raise AssertionError(f"only {uploaded_shards(client, run_id)} were uploaded")
+
+
+def test_sealed_shards_upload_before_the_run_ends(tracking):
+    with exp_track.start_run(capture_code=False) as run:
+        run_id = run.info.run_id
+        with exp_track.tensorboard(
+            shard_max_bytes=16 * 1024, sync_interval=0.05
+        ) as writer:
+            for step in range(40):
+                writer.add_image("train/sample", image(), step)
+            sealed = wait_for_shards(tracking, run_id, 2)
+            assert writer.media_path.name not in sealed
+
+
+def test_sealed_shard_is_not_uploaded_twice(tracking, monkeypatch):
+    uploaded: list[str] = []
+    original = MlflowClient.log_artifact
+
+    def spy(self, run_id, local_path, artifact_path=None):
+        uploaded.append(Path(local_path).name)
+        return original(self, run_id, local_path, artifact_path=artifact_path)
+
+    monkeypatch.setattr(MlflowClient, "log_artifact", spy)
+
+    with (
+        exp_track.start_run(capture_code=False) as run,
+        exp_track.tensorboard(shard_max_bytes=16 * 1024, sync_interval=0.05) as writer,
+    ):
+        for step in range(40):
+            writer.add_image("train/sample", image(), step)
+        sealed = wait_for_shards(tracking, run.info.run_id, 2)
+        # Several more ticks pass with the sealed shards unchanged.
+        time.sleep(0.3)
+
+    for name in sealed:
+        assert uploaded.count(name) == 1
+
+
+def test_logdir_tag_is_set_on_entry(tracking):
+    with (
+        exp_track.start_run(capture_code=False) as run,
+        exp_track.tensorboard(sync_interval=60.0),
+    ):
+        tags = tracking.get_run(run.info.run_id).data.tags
+        assert tags[TB_TAG_LOGDIR] == TB_ARTIFACT_DIR
+
+
+def uploaded_scalars(client, run_id: str, tmp_path: Path) -> list[int]:
+    """The scalar steps TensorBoard reads back from a run's uploaded artifacts."""
+    local = tmp_path / run_id
+    local.mkdir(parents=True, exist_ok=True)
+    downloaded = client.download_artifacts(run_id, TB_ARTIFACT_DIR, str(local))
+    accumulator = accumulate(Path(downloaded))
+    return [point.step for point in accumulator.Scalars("train/loss")]
+
+
+def write_some(writer) -> None:
+    for step in range(10):
+        writer.add_scalar("train/loss", 1.0 / (step + 1), step)
+        writer.add_image("train/sample", image(), step)
+
+
+def test_normal_exit_uploads_everything(tracking, tmp_path):
+    with exp_track.start_run(capture_code=False) as run:
+        with exp_track.tensorboard(sync_interval=60.0) as writer:
+            write_some(writer)
+        assert uploaded_scalars(tracking, run.info.run_id, tmp_path) == list(range(10))
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
+def test_exit_by_raising_uploads_everything(tracking, tmp_path, failure):
+    def interrupted_logging():
+        with exp_track.tensorboard(sync_interval=60.0) as writer:
+            write_some(writer)
+            raise failure("stop")
+
+    with exp_track.start_run(capture_code=False) as run:
+        with pytest.raises(failure):
+            interrupted_logging()
+        assert uploaded_scalars(tracking, run.info.run_id, tmp_path) == list(range(10))
+
+
+def test_unreachable_tracking_server_does_not_reach_user_code(tracking, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise ConnectionError("tracking server unreachable")
+
+    def logging_while_unreachable():
+        with exp_track.tensorboard(sync_interval=0.05) as writer:
+            write_some(writer)
+            time.sleep(0.2)
+        return True
+
+    monkeypatch.setattr(MlflowClient, "log_artifact", refuse)
+    monkeypatch.setattr(MlflowClient, "set_tag", refuse)
+    with (
+        exp_track.start_run(capture_code=False),
+        pytest.warns(UserWarning, match="tracking server unreachable"),
+    ):
+        reached_the_end = logging_while_unreachable()
+
+    assert reached_the_end
+
+
+def test_failing_upload_at_exit_does_not_raise(tracking, monkeypatch):
+    def logging_with_failed_exit_upload():
+        with exp_track.tensorboard(sync_interval=60.0) as writer:
+            write_some(writer)
+            monkeypatch.setattr(
+                MlflowClient,
+                "log_artifact",
+                lambda *args, **kwargs: (_ for _ in ()).throw(OSError("upload failed")),
+            )
+        return True
+
+    with (
+        exp_track.start_run(capture_code=False),
+        pytest.warns(UserWarning, match="upload failed"),
+    ):
+        reached_the_end = logging_with_failed_exit_upload()
+
+    assert reached_the_end
+
+
+def test_write_failure_does_not_reach_user_code(logdir):
+    writer = TensorBoardWriter(logdir)
+    with pytest.warns(UserWarning, match="add_scalar"):
+        writer.add_scalar("train/loss", object(), 1)
+    with pytest.warns(UserWarning, match="add_image"):
+        writer.add_image("train/sample", object(), 1)
+    writer.close()
+
+
+def test_no_active_run_raises_a_named_error(tracking):
+    with (
+        pytest.raises(RuntimeError, match="active MLflow run"),
+        exp_track.tensorboard(),
+    ):
+        pass

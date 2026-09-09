@@ -6,8 +6,9 @@ import mlflow
 
 from exp_track._capture import capture, capture_enabled
 from exp_track._params import load_params, log_params
+from exp_track._tensorboard import tensorboard
 
-__all__ = ["load_params", "log_params", "start_run"]
+__all__ = ["load_params", "log_params", "start_run", "tensorboard"]
 
 
 def start_run(*args: Any, capture_code: bool = True, **kwargs: Any) -> Any:

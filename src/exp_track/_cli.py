@@ -1,8 +1,10 @@
 """The `exp-track` command line application."""
 
 import re
+import subprocess
 import sys
 import tempfile
+from importlib.util import find_spec
 from pathlib import Path
 
 from cyclopts import App
@@ -33,10 +35,11 @@ from exp_track._tags import (
     TAG_PATCH_RUN_ID,
     TAG_PATCH_SHA256,
 )
+from exp_track._tb_fetch import assemble_logdir
 
 app = App(
     name="exp-track",
-    help="Inspect and reconstruct the code state recorded on an MLflow run.",
+    help="Inspect MLflow runs, reconstruct their code, and view TensorBoard data.",
 )
 
 RUN_ID = re.compile(r"\A[0-9a-f]{32}\Z")
@@ -90,7 +93,14 @@ def resolve_run(
 
 def _experiment_ids(client: MlflowClient, experiment: str | None) -> list[str]:
     if experiment is None:
-        return [found.experiment_id for found in client.search_experiments()]
+        ids = []
+        token = None
+        while True:
+            page = client.search_experiments(page_token=token)
+            ids.extend(found.experiment_id for found in page)
+            token = page.token
+            if not token:
+                return ids
     found = client.get_experiment_by_name(experiment)
     if found is None:
         raise CliError(f"no experiment named {experiment!r} on {client.tracking_uri}")
@@ -99,6 +109,79 @@ def _experiment_ids(client: MlflowClient, experiment: str | None) -> list[str]:
 
 def _quote(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _tb_runs(
+    client: MlflowClient,
+    run_refs: tuple[str, ...],
+    experiment: str | None,
+    filter_string: str,
+) -> list[Run]:
+    runs = [resolve_run(client, ref, experiment) for ref in run_refs]
+    if run_refs and not filter_string:
+        return runs
+    selected_ids = {run.info.run_id for run in runs}
+    experiment_ids = _experiment_ids(client, experiment)
+    if not experiment_ids:
+        return []
+    matches = []
+    token = None
+    while True:
+        page = client.search_runs(
+            experiment_ids, filter_string=filter_string, page_token=token
+        )
+        matches.extend(
+            run for run in page if not run_refs or run.info.run_id in selected_ids
+        )
+        token = page.token
+        if not token:
+            return matches
+
+
+@app.command
+def tb(
+    *run_refs: str,
+    experiment: str | None = None,
+    filter: str = "",
+    media: bool = False,
+    tracking_uri: str | None = None,
+) -> None:
+    """Open TensorBoard on selected MLflow runs.
+
+    Parameters
+    ----------
+    run_refs
+        Run ids or names. Omit to search all runs in the selected experiments.
+    experiment
+        Experiment name, defaulting to all experiments.
+    filter
+        MLflow filter expression to narrow the selected runs.
+    media
+        Include images, histograms, and other media alongside scalar data.
+    tracking_uri
+        Tracking server to query, overriding the MLflow environment.
+    """
+    client = make_client(tracking_uri)
+    runs = _tb_runs(client, run_refs, experiment, filter)
+    with assemble_logdir(client, runs, media=media) as logdir:
+        if not any(logdir.iterdir()):
+            print("No runs found with TensorBoard data matching the selection.")
+            return
+        _launch_tensorboard(logdir)
+
+
+def _launch_tensorboard(logdir: Path) -> None:
+    if find_spec("tensorboard") is None:
+        raise CliError("TensorBoard is required; install it with `uv add tensorboard`.")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "tensorboard.main", "--logdir", str(logdir)],
+            check=True,
+        )
+    except KeyboardInterrupt:
+        return
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise CliError(f"TensorBoard could not run: {exc}") from exc
 
 
 def code_state(run: Run) -> dict[str, str]:
