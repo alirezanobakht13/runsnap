@@ -8,12 +8,19 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "cyclopts>=4",
     "mlflow>=3.16.0",
+    "pydantic>=2",
 ]
 
 [project.scripts]
-exp-track = "exp_track:main"
+exp-track = "exp_track._cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.11,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
