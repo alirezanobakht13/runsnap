@@ -1,7 +1,7 @@
 [project]
-name = "exp-track"
+name = "runsnap"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reproducible MLflow runs: snapshot the code behind every run, and put it back."
 readme = "README.md"
 authors = [
     { name = "alirezanobakht13", email = "a.nobakht13@gmail.com" }
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-exp-track = "exp_track._cli:main"
+runsnap = "runsnap._cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.11,<0.13.0"]

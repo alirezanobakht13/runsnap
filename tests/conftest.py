@@ -80,7 +80,7 @@ def tracking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A local sqlite-backed MLflow tracking store, isolated per test."""
     import mlflow
 
-    from exp_track._capture import reset_code_state_cache
+    from runsnap._capture import reset_code_state_cache
 
     uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
     artifacts = tmp_path / "artifacts"
@@ -89,7 +89,7 @@ def tracking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     mlflow.set_tracking_uri(uri)
     client = mlflow.MlflowClient()
     experiment_id = client.create_experiment(
-        "exp-track-tests", artifact_location=artifacts.as_uri()
+        "runsnap-tests", artifact_location=artifacts.as_uri()
     )
     mlflow.set_experiment(experiment_id=experiment_id)
     reset_code_state_cache()

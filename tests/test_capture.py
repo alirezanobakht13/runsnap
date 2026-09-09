@@ -7,9 +7,9 @@ import mlflow
 import pytest
 from conftest import GitRepo
 
-import exp_track
-from exp_track import _capture, _git
-from exp_track._tags import (
+import runsnap
+from runsnap import _capture, _git
+from runsnap._tags import (
     MLFLOW_TAG_BRANCH,
     MLFLOW_TAG_COMMIT,
     MLFLOW_TAG_DIRTY,
@@ -54,7 +54,7 @@ def test_git_is_read_once_across_runs(in_repo: GitRepo, tracking, monkeypatch):
     monkeypatch.setattr(_git, "_git", counting)
 
     for _ in range(3):
-        with exp_track.start_run():
+        with runsnap.start_run():
             pass
 
     assert calls.count(("diff", "--no-ext-diff", "--binary", "HEAD")) == 1
@@ -67,7 +67,7 @@ def test_dirty_run_records_tags_and_patch(in_repo: GitRepo, tracking):
     in_repo.write("main.py", "print('changed')\n")
     in_repo.write("added.txt", "new\n")
 
-    with exp_track.start_run() as run:
+    with runsnap.start_run() as run:
         run_id = run.info.run_id
 
     recorded = tags(tracking, run_id)
@@ -85,7 +85,7 @@ def test_dirty_run_records_tags_and_patch(in_repo: GitRepo, tracking):
 
 
 def test_clean_tree_records_no_patch(in_repo: GitRepo, tracking):
-    with exp_track.start_run() as run:
+    with runsnap.start_run() as run:
         run_id = run.info.run_id
 
     recorded = tags(tracking, run_id)
@@ -96,9 +96,9 @@ def test_clean_tree_records_no_patch(in_repo: GitRepo, tracking):
 
 def test_identical_trees_share_a_digest(in_repo: GitRepo, tracking):
     in_repo.write("main.py", "print('changed')\n")
-    with exp_track.start_run() as first:
+    with runsnap.start_run() as first:
         first_id = first.info.run_id
-    with exp_track.start_run() as second:
+    with runsnap.start_run() as second:
         second_id = second.info.run_id
     assert (
         tags(tracking, first_id)[TAG_PATCH_SHA256]
@@ -107,7 +107,7 @@ def test_identical_trees_share_a_digest(in_repo: GitRepo, tracking):
 
     in_repo.write("main.py", "print('changed again')\n")
     _capture.reset_code_state_cache()
-    with exp_track.start_run() as third:
+    with runsnap.start_run() as third:
         third_id = third.info.run_id
     assert (
         tags(tracking, third_id)[TAG_PATCH_SHA256]
@@ -118,10 +118,10 @@ def test_identical_trees_share_a_digest(in_repo: GitRepo, tracking):
 def test_nested_runs_point_at_the_parents_patch(in_repo: GitRepo, tracking):
     in_repo.write("main.py", "print('changed')\n")
     child_ids = []
-    with exp_track.start_run() as parent:
+    with runsnap.start_run() as parent:
         parent_id = parent.info.run_id
         for _ in range(2):
-            with exp_track.start_run(nested=True) as child:
+            with runsnap.start_run(nested=True) as child:
                 child_ids.append(child.info.run_id)
 
     assert artifact_paths(tracking, parent_id) == {PATCH_ARTIFACT_PATH}
@@ -135,10 +135,10 @@ def test_nested_runs_point_at_the_parents_patch(in_repo: GitRepo, tracking):
 
 
 def test_oversized_patch_is_skipped(in_repo: GitRepo, tracking, monkeypatch):
-    monkeypatch.setenv("EXP_TRACK_MAX_PATCH_BYTES", "10")
+    monkeypatch.setenv("RUNSNAP_MAX_PATCH_BYTES", "10")
     in_repo.write("main.py", "print('a much longer line than ten bytes')\n")
 
-    with pytest.warns(UserWarning, match="exceeds"), exp_track.start_run() as run:
+    with pytest.warns(UserWarning, match="exceeds"), runsnap.start_run() as run:
         run_id = run.info.run_id
 
     recorded = tags(tracking, run_id)
@@ -151,7 +151,7 @@ def test_mlflow_git_tags_are_filled_when_absent(in_repo: GitRepo, tracking):
     in_repo.git("remote", "add", "origin", "https://example.com/o/r.git")
     in_repo.write("main.py", "print('changed')\n")
 
-    with exp_track.start_run() as run:
+    with runsnap.start_run() as run:
         run_id = run.info.run_id
 
     recorded = tags(tracking, run_id)
@@ -163,7 +163,7 @@ def test_mlflow_git_tags_are_filled_when_absent(in_repo: GitRepo, tracking):
 
 
 def test_mlflow_git_tags_already_set_are_left_alone(in_repo: GitRepo, tracking):
-    with exp_track.start_run(tags={MLFLOW_TAG_COMMIT: "resolved-by-mlflow"}) as run:
+    with runsnap.start_run(tags={MLFLOW_TAG_COMMIT: "resolved-by-mlflow"}) as run:
         run_id = run.info.run_id
 
     recorded = tags(tracking, run_id)
@@ -176,11 +176,11 @@ def test_outside_a_repository_records_nothing(tmp_path: Path, tracking, monkeypa
     outside.mkdir()
     monkeypatch.chdir(outside)
 
-    with pytest.warns(UserWarning, match="no code state"), exp_track.start_run() as run:
+    with pytest.warns(UserWarning, match="no code state"), runsnap.start_run() as run:
         run_id = run.info.run_id
 
     recorded = tags(tracking, run_id)
-    assert not [key for key in recorded if key.startswith("exp_track.")]
+    assert not [key for key in recorded if key.startswith("runsnap.")]
 
 
 def test_missing_git_binary_warns_only(in_repo: GitRepo, tracking, monkeypatch):
@@ -191,12 +191,12 @@ def test_missing_git_binary_warns_only(in_repo: GitRepo, tracking, monkeypatch):
 
     with (
         pytest.warns(UserWarning, match="could not run git"),
-        exp_track.start_run() as run,
+        runsnap.start_run() as run,
     ):
         run_id = run.info.run_id
 
     monkeypatch.undo()
-    assert not [key for key in tags(tracking, run_id) if key.startswith("exp_track.")]
+    assert not [key for key in tags(tracking, run_id) if key.startswith("runsnap.")]
 
 
 def test_repository_with_no_commits_records_the_reason(
@@ -204,7 +204,7 @@ def test_repository_with_no_commits_records_the_reason(
 ):
     monkeypatch.chdir(repo.path)
 
-    with pytest.warns(UserWarning, match="no commit"), exp_track.start_run() as run:
+    with pytest.warns(UserWarning, match="no commit"), runsnap.start_run() as run:
         run_id = run.info.run_id
 
     recorded = tags(tracking, run_id)
@@ -221,7 +221,7 @@ def test_unexpected_git_failure_does_not_escape(
 
     monkeypatch.setattr(_capture, "build_patch", broken)
 
-    with pytest.warns(UserWarning, match="catastrophe"), exp_track.start_run() as run:
+    with pytest.warns(UserWarning, match="catastrophe"), runsnap.start_run() as run:
         run_id = run.info.run_id
 
     assert "catastrophe" in tags(tracking, run_id)[TAG_CAPTURE_ERROR]
@@ -230,7 +230,7 @@ def test_unexpected_git_failure_does_not_escape(
 def test_start_run_forwards_arguments_and_returns_mlflows_run(
     in_repo: GitRepo, tracking
 ):
-    with exp_track.start_run(run_name="named", tags={"custom": "value"}) as run:
+    with runsnap.start_run(run_name="named", tags={"custom": "value"}) as run:
         assert isinstance(run, mlflow.ActiveRun)
         assert run is mlflow.active_run()
         run_id = run.info.run_id
@@ -245,20 +245,20 @@ def test_start_run_forwards_arguments_and_returns_mlflows_run(
 
 def test_capture_code_false_suppresses_capture(in_repo: GitRepo, tracking):
     in_repo.write("main.py", "print('changed')\n")
-    with exp_track.start_run(capture_code=False) as run:
+    with runsnap.start_run(capture_code=False) as run:
         run_id = run.info.run_id
 
-    assert not [key for key in tags(tracking, run_id) if key.startswith("exp_track.")]
+    assert not [key for key in tags(tracking, run_id) if key.startswith("runsnap.")]
     assert artifact_paths(tracking, run_id) == set()
 
 
 def test_environment_opt_out_suppresses_capture(
     in_repo: GitRepo, tracking, monkeypatch
 ):
-    monkeypatch.setenv("EXP_TRACK_CAPTURE_CODE", "0")
+    monkeypatch.setenv("RUNSNAP_CAPTURE_CODE", "0")
     in_repo.write("main.py", "print('changed')\n")
-    with exp_track.start_run() as run:
+    with runsnap.start_run() as run:
         run_id = run.info.run_id
 
-    assert not [key for key in tags(tracking, run_id) if key.startswith("exp_track.")]
+    assert not [key for key in tags(tracking, run_id) if key.startswith("runsnap.")]
     assert artifact_paths(tracking, run_id) == set()

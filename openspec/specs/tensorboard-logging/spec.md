@@ -6,18 +6,18 @@ Lets a run log metrics, images, and histograms as TensorBoard event files that l
 
 ### Requirement: A writer bound to the active run
 
-`exp_track.tensorboard()` SHALL return a context manager yielding a TensorBoard summary writer bound to the active MLflow run. The writer SHALL expose the standard TensorBoard summary-writer method surface (`add_scalar`, `add_image`, `add_histogram`, `add_text`, `add_figure`, and the rest), so that code written against any TensorBoard writer works unchanged. The writer SHALL NOT require, import, or assume any machine-learning framework.
+`runsnap.tensorboard()` SHALL return a context manager yielding a TensorBoard summary writer bound to the active MLflow run. The writer SHALL expose the standard TensorBoard summary-writer method surface (`add_scalar`, `add_image`, `add_histogram`, `add_text`, `add_figure`, and the rest), so that code written against any TensorBoard writer works unchanged. The writer SHALL NOT require, import, or assume any machine-learning framework.
 
 Leaving the context manager SHALL flush and upload everything not yet uploaded, then close the writer.
 
 #### Scenario: Writing from any framework
 
-- **WHEN** a user opens `exp_track.tensorboard()` inside an active run and calls `add_scalar("train/loss", value, step)` with a plain Python float, and separately with a JAX or PyTorch array converted by the writer's normal array handling
-- **THEN** the value is recorded in the run's event files in every case, and no framework package is imported by `exp_track`
+- **WHEN** a user opens `runsnap.tensorboard()` inside an active run and calls `add_scalar("train/loss", value, step)` with a plain Python float, and separately with a JAX or PyTorch array converted by the writer's normal array handling
+- **THEN** the value is recorded in the run's event files in every case, and no framework package is imported by `runsnap`
 
 #### Scenario: No active run
 
-- **WHEN** `exp_track.tensorboard()` is entered with no active MLflow run and no run id given
+- **WHEN** `runsnap.tensorboard()` is entered with no active MLflow run and no run id given
 - **THEN** it raises an error naming the problem, rather than silently discarding the data
 
 #### Scenario: Clean exit uploads everything
@@ -27,7 +27,7 @@ Leaving the context manager SHALL flush and upload everything not yet uploaded, 
 
 ### Requirement: Event files live in the run's artifacts
 
-Event files SHALL be uploaded to the run's MLflow artifacts under the path `tb/`, and the run SHALL carry the tag `exp_track.tb.logdir` naming that path. The uploaded directory SHALL be a valid TensorBoard log directory: pointing TensorBoard at a local copy of it SHALL show the run's scalars, images, and histograms.
+Event files SHALL be uploaded to the run's MLflow artifacts under the path `tb/`, and the run SHALL carry the tag `runsnap.tb.logdir` naming that path. The uploaded directory SHALL be a valid TensorBoard log directory: pointing TensorBoard at a local copy of it SHALL show the run's scalars, images, and histograms.
 
 #### Scenario: Artifacts are a usable log directory
 
@@ -37,7 +37,7 @@ Event files SHALL be uploaded to the run's MLflow artifacts under the path `tb/`
 #### Scenario: Run is discoverable
 
 - **WHEN** a run has logged TensorBoard data
-- **THEN** it carries tag `exp_track.tb.logdir` = `tb`, so runs with TensorBoard data can be found by an MLflow tag query
+- **THEN** it carries tag `runsnap.tb.logdir` = `tb`, so runs with TensorBoard data can be found by an MLflow tag query
 
 ### Requirement: Scalars are separated from heavy media
 

@@ -6,11 +6,11 @@ Reconstructs the code that produced a recorded MLflow run, placing it on a new b
 
 ### Requirement: A run's code state can be reconstructed by reference
 
-The `exp-track checkout` command SHALL take a reference to a recorded run, create a branch at that run's base commit, and reapply that run's recorded patch, producing a working tree matching the run's original code state.
+The `runsnap checkout` command SHALL take a reference to a recorded run, create a branch at that run's base commit, and reapply that run's recorded patch, producing a working tree matching the run's original code state.
 
 #### Scenario: Reconstructing a dirty run
 
-- **WHEN** a user runs `exp-track checkout <run-id>` for a run captured from a dirty working tree
+- **WHEN** a user runs `runsnap checkout <run-id>` for a run captured from a dirty working tree
 - **THEN** a branch is created at the recorded commit, the recorded patch is applied on top, and the resulting working tree matches the state the run was started from
 
 #### Scenario: Reconstructing a clean run
@@ -125,11 +125,11 @@ The command SHALL verify that it can complete before modifying anything, and SHA
 
 ### Requirement: A run's recorded code state can be inspected without reconstruction
 
-The `exp-track show` command SHALL print a run's recorded code state — base commit, branch, dirty flag, patch digest, and a summary of the files the patch touches — without creating branches or worktrees.
+The `runsnap show` command SHALL print a run's recorded code state — base commit, branch, dirty flag, patch digest, and a summary of the files the patch touches — without creating branches or worktrees.
 
 #### Scenario: Inspecting a run
 
-- **WHEN** a user runs `exp-track show <run-ref>` for a captured run
+- **WHEN** a user runs `runsnap show <run-ref>` for a captured run
 - **THEN** the recorded commit, branch, dirty flag, patch digest, and the list of files the patch changes are printed, and the repository is not modified
 
 #### Scenario: Comparing code across runs

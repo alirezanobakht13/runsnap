@@ -10,7 +10,7 @@ import pytest
 from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 
-from exp_track import _cli
+from runsnap import _cli
 
 LIGHT = "events.out.tfevents.1.host.scalars"
 MEDIA = "events.out.tfevents.1.host.media.0"
@@ -56,7 +56,7 @@ def viewer(monkeypatch: pytest.MonkeyPatch) -> dict[str, set[str]]:
 
 
 def invoke(monkeypatch: pytest.MonkeyPatch, *args: str) -> None:
-    monkeypatch.setattr(sys, "argv", ["exp-track", "tb", *args])
+    monkeypatch.setattr(sys, "argv", ["runsnap", "tb", *args])
     try:
         _cli.main()
     except SystemExit as exc:
@@ -84,7 +84,7 @@ def test_experiment_selection(tracking, tmp_path, cache, viewer, monkeypatch, fi
     logged_run(tracking, tmp_path, "elsewhere", experiment_id=other)
     with mlflow.start_run(run_name="no-events"):
         pass
-    args = ["--experiment", "exp-track-tests"]
+    args = ["--experiment", "runsnap-tests"]
     if filtered:
         args.extend(["--filter", "params.optimizer = 'adamw'"])
 
@@ -125,10 +125,10 @@ def test_experiment_resolves_duplicate_names(
     )
     logged_run(tracking, tmp_path, "twin", experiment_id=other)
 
-    invoke(monkeypatch, "twin", "--experiment", "exp-track-tests")
+    invoke(monkeypatch, "twin", "--experiment", "runsnap-tests")
 
     assert set(viewer) == {"twin"}
-    assert {path.name for path in (cache / "exp-track" / "tensorboard").iterdir()} == {
+    assert {path.name for path in (cache / "runsnap" / "tensorboard").iterdir()} == {
         wanted.info.run_id
     }
 
@@ -137,7 +137,7 @@ def test_experiment_resolves_duplicate_names(
 def test_no_matching_data_does_not_launch(
     tracking, tmp_path, cache, monkeypatch, capsys, selection
 ):
-    args = ["--experiment", "exp-track-tests"]
+    args = ["--experiment", "runsnap-tests"]
     if selection == "no-events":
         with mlflow.start_run(run_name="no-events"):
             pass

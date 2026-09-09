@@ -1,4 +1,4 @@
-"""Tests for the `exp-track` command line application."""
+"""Tests for the `runsnap` command line application."""
 
 import sys
 from pathlib import Path
@@ -7,9 +7,9 @@ import mlflow
 import pytest
 from conftest import GitRepo
 
-import exp_track
-from exp_track import _cli, _git
-from exp_track._cli import (
+import runsnap
+from runsnap import _cli, _git
+from runsnap._cli import (
     CliError,
     checkout,
     main,
@@ -17,7 +17,7 @@ from exp_track._cli import (
     resolve_run,
     show,
 )
-from exp_track._tags import TAG_COMMIT, TAG_PATCH_RUN_ID, TAG_PATCH_SHA256
+from runsnap._tags import TAG_COMMIT, TAG_PATCH_RUN_ID, TAG_PATCH_SHA256
 
 
 def test_run_id_reference_is_looked_up_directly(tracking) -> None:
@@ -46,7 +46,7 @@ def test_ambiguous_run_name_lists_candidates(tracking) -> None:
     message = str(raised.value)
     assert "2 runs are named 'twin'" in message
     assert all(run_id in message for run_id in ids)
-    assert "exp-track-tests" in message
+    assert "runsnap-tests" in message
 
 
 def test_unknown_reference_names_the_reference_and_server(tracking) -> None:
@@ -76,7 +76,7 @@ def test_experiment_narrows_the_name_search(tracking) -> None:
     with mlflow.start_run(run_name="twin", experiment_id=other):
         pass
 
-    resolved = resolve_run(make_client(), "twin", experiment="exp-track-tests")
+    resolved = resolve_run(make_client(), "twin", experiment="runsnap-tests")
 
     assert resolved.info.run_id == wanted
 
@@ -103,7 +103,7 @@ def dirty_run(repo: GitRepo) -> str:
     """A run captured from a dirty tree; returns its run id."""
     repo.write("main.py", "print('changed')\n")
     repo.write("added.txt", "new\n")
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         return active.info.run_id
 
 
@@ -130,7 +130,7 @@ def test_show_prints_the_recorded_code_state(
 def test_show_on_a_clean_run_reports_no_patch(
     in_repo: GitRepo, tracking, capsys
 ) -> None:
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
 
     show(run_id)
@@ -170,7 +170,7 @@ def test_checkout_reconstructs_the_working_tree(
 ) -> None:
     in_repo.write("main.py", "print('changed')\n")
     in_repo.write("added.txt", "new\n")
-    with exp_track.start_run(run_name="baseline-lr3") as active:
+    with runsnap.start_run(run_name="baseline-lr3") as active:
         run_id = active.info.run_id
     original = tree_state(in_repo.path)
 
@@ -181,12 +181,12 @@ def test_checkout_reconstructs_the_working_tree(
     created = Path(line.removeprefix("path:").strip())
     assert created.is_dir()
     assert tree_state(created) == original
-    assert f"exp-track/baseline-lr3-{run_id[:8]}" in printed
+    assert f"runsnap/baseline-lr3-{run_id[:8]}" in printed
 
 
 def test_checkout_leaves_the_patch_uncommitted(in_repo: GitRepo, tracking) -> None:
     in_repo.write("main.py", "print('changed')\n")
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
 
     checkout(run_id, path=in_repo.path.parent / "rebuilt")
@@ -197,7 +197,7 @@ def test_checkout_leaves_the_patch_uncommitted(in_repo: GitRepo, tracking) -> No
 
 def test_checkout_leaves_the_users_tree_untouched(in_repo: GitRepo, tracking) -> None:
     in_repo.write("main.py", "print('changed')\n")
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
     before = in_repo.status()
 
@@ -210,7 +210,7 @@ def test_checkout_leaves_the_users_tree_untouched(in_repo: GitRepo, tracking) ->
 def test_checkout_of_a_clean_run_reports_the_clean_tree(
     in_repo: GitRepo, tracking, capsys
 ) -> None:
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
 
     checkout(run_id)
@@ -225,7 +225,7 @@ def test_nested_run_follows_its_parents_patch(
     in_repo: GitRepo, tracking, capsys
 ) -> None:
     in_repo.write("main.py", "print('changed')\n")
-    with exp_track.start_run(), exp_track.start_run(nested=True) as child:
+    with runsnap.start_run(), runsnap.start_run(nested=True) as child:
         child_id = child.info.run_id
     assert TAG_PATCH_RUN_ID in tracking.get_run(child_id).data.tags
     original = tree_state(in_repo.path)
@@ -236,7 +236,7 @@ def test_nested_run_follows_its_parents_patch(
 
 
 def test_explicit_branch_name_is_used(in_repo: GitRepo, tracking) -> None:
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
 
     checkout(run_id, branch="chosen")
@@ -248,7 +248,7 @@ def test_in_place_checkout_switches_the_current_tree(
     in_repo: GitRepo, tracking, capsys
 ) -> None:
     in_repo.write("main.py", "print('changed')\n")
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
     original = tree_state(in_repo.path)
     in_repo.commit("keep the working tree clean")
@@ -261,7 +261,7 @@ def test_in_place_checkout_switches_the_current_tree(
 
 
 def test_in_place_refuses_a_dirty_tree(in_repo: GitRepo, tracking) -> None:
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
     in_repo.write("scratch.py", "work in progress\n")
 
@@ -272,7 +272,7 @@ def test_in_place_refuses_a_dirty_tree(in_repo: GitRepo, tracking) -> None:
 
 
 def test_force_overrides_the_dirty_tree_refusal(in_repo: GitRepo, tracking) -> None:
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
     in_repo.write("main.py", "print('work in progress')\n")
 
@@ -284,7 +284,7 @@ def test_force_overrides_the_dirty_tree_refusal(in_repo: GitRepo, tracking) -> N
 
 def test_commit_snapshots_the_patch(in_repo: GitRepo, tracking, capsys) -> None:
     in_repo.write("main.py", "print('changed')\n")
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
     base = tracking.get_run(run_id).data.tags[TAG_COMMIT]
 
@@ -296,7 +296,7 @@ def test_commit_snapshots_the_patch(in_repo: GitRepo, tracking, capsys) -> None:
 
 
 def test_missing_base_commit_is_reported(in_repo: GitRepo, tracking, tmp_path) -> None:
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
     elsewhere = GitRepo(tmp_path / "elsewhere")
     elsewhere.path.mkdir()
@@ -312,7 +312,7 @@ def test_missing_base_commit_is_reported(in_repo: GitRepo, tracking, tmp_path) -
 
 
 def test_existing_branch_is_reported(in_repo: GitRepo, tracking) -> None:
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
     in_repo.git("branch", "taken")
 
@@ -331,7 +331,7 @@ def test_run_without_code_state_is_reported(in_repo: GitRepo, tracking) -> None:
 def test_outside_a_repository_is_reported(
     in_repo: GitRepo, tracking, tmp_path, monkeypatch
 ) -> None:
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -345,7 +345,7 @@ def test_failing_patch_leaves_nothing_behind(
     in_repo: GitRepo, tracking, monkeypatch
 ) -> None:
     in_repo.write("main.py", "print('changed')\n")
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
 
     def refuse(tree, patch):
@@ -356,15 +356,15 @@ def test_failing_patch_leaves_nothing_behind(
     with pytest.raises(CliError, match="does not apply"):
         checkout(run_id)
 
-    assert "exp-track" not in in_repo.git("branch", "--list")
-    assert not (in_repo.path.parent / f"repo-exp-track-{run_id[:8]}").exists()
+    assert "runsnap" not in in_repo.git("branch", "--list")
+    assert not (in_repo.path.parent / f"repo-runsnap-{run_id[:8]}").exists()
 
 
 def test_in_place_failure_restores_the_previous_branch(
     in_repo: GitRepo, tracking, monkeypatch
 ) -> None:
     in_repo.write("main.py", "print('changed')\n")
-    with exp_track.start_run() as active:
+    with runsnap.start_run() as active:
         run_id = active.info.run_id
     in_repo.commit("keep the working tree clean")
 
@@ -383,10 +383,10 @@ def test_in_place_failure_restores_the_previous_branch(
 def test_main_reports_a_failure_without_a_traceback(
     in_repo: GitRepo, tracking, capsys, monkeypatch
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["exp-track", "show", "nowhere"])
+    monkeypatch.setattr(sys, "argv", ["runsnap", "show", "nowhere"])
 
     with pytest.raises(SystemExit) as raised:
         main()
 
     assert raised.value.code == 1
-    assert "exp-track: no run named 'nowhere'" in capsys.readouterr().err
+    assert "runsnap: no run named 'nowhere'" in capsys.readouterr().err

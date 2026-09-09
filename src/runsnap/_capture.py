@@ -11,7 +11,7 @@ from pathlib import Path
 from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 
-from exp_track._git import (
+from runsnap._git import (
     GitError,
     GitState,
     build_patch,
@@ -20,7 +20,7 @@ from exp_track._git import (
     head_commit,
     remote_url,
 )
-from exp_track._tags import (
+from runsnap._tags import (
     DEFAULT_MAX_PATCH_BYTES,
     ENV_CAPTURE_CODE,
     ENV_MAX_PATCH_BYTES,
@@ -124,25 +124,25 @@ def capture(run: Run) -> None:
     """Record the code state of the working tree onto `run`.
 
     Every failure is reported as a warning and, where a run exists to carry it,
-    as an `exp_track.git.capture_error` tag. Nothing raises into user code.
+    as an `runsnap.git.capture_error` tag. Nothing raises into user code.
     """
     client = MlflowClient()
     run_id = run.info.run_id
     try:
         resolve_repo_root()
     except GitError as exc:
-        warnings.warn(f"exp_track captured no code state: {exc}", stacklevel=3)
+        warnings.warn(f"runsnap captured no code state: {exc}", stacklevel=3)
         return
     try:
         state = resolve_code_state()
     except Exception as exc:  # noqa: BLE001 - capture must never fail the run
-        warnings.warn(f"exp_track could not capture code state: {exc}", stacklevel=3)
+        warnings.warn(f"runsnap could not capture code state: {exc}", stacklevel=3)
         _record_error(client, run_id, str(exc))
         return
     try:
         _record_state(client, run, state)
     except Exception as exc:  # noqa: BLE001 - capture must never fail the run
-        warnings.warn(f"exp_track could not capture code state: {exc}", stacklevel=3)
+        warnings.warn(f"runsnap could not capture code state: {exc}", stacklevel=3)
         _record_error(client, run_id, str(exc))
 
 
@@ -178,7 +178,7 @@ def _record_patch(client: MlflowClient, run: Run, state: CodeState) -> None:
     ceiling = max_patch_bytes()
     if len(state.patch) > ceiling:
         warnings.warn(
-            f"exp_track skipped the code state patch: "
+            f"runsnap skipped the code state patch: "
             f"{len(state.patch)} bytes exceeds the {ceiling} byte limit",
             stacklevel=4,
         )

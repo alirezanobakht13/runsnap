@@ -1,4 +1,4 @@
-"""The `exp-track` command line application."""
+"""The `runsnap` command line application."""
 
 import re
 import subprocess
@@ -11,7 +11,7 @@ from cyclopts import App
 from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 
-from exp_track._git import (
+from runsnap._git import (
     GitError,
     add_worktree,
     apply_patch,
@@ -27,7 +27,7 @@ from exp_track._git import (
     patch_files,
     remove_worktree,
 )
-from exp_track._tags import (
+from runsnap._tags import (
     PATCH_ARTIFACT_PATH,
     TAG_BRANCH,
     TAG_COMMIT,
@@ -35,10 +35,10 @@ from exp_track._tags import (
     TAG_PATCH_RUN_ID,
     TAG_PATCH_SHA256,
 )
-from exp_track._tb_fetch import assemble_logdir
+from runsnap._tb_fetch import assemble_logdir
 
 app = App(
-    name="exp-track",
+    name="runsnap",
     help="Inspect MLflow runs, reconstruct their code, and view TensorBoard data.",
 )
 
@@ -185,12 +185,12 @@ def _launch_tensorboard(logdir: Path) -> None:
 
 
 def code_state(run: Run) -> dict[str, str]:
-    """The `exp_track.git.*` tags on `run`, or nothing when it was never captured."""
+    """The `runsnap.git.*` tags on `run`, or nothing when it was never captured."""
     tags = run.data.tags
     if TAG_COMMIT not in tags:
         raise CliError(
             f"run {run.info.run_id} carries no code state; it was not started "
-            f"with exp_track.start_run()"
+            f"with runsnap.start_run()"
         )
     return tags
 
@@ -258,7 +258,7 @@ def resolve_repo(repo: Path | None) -> Path:
     except GitError as exc:
         where = f"{repo}" if repo is not None else "the working directory"
         raise CliError(
-            f"{where} is not inside a git repository; run exp-track from the "
+            f"{where} is not inside a git repository; run runsnap from the "
             f"repository holding the run's code, or pass --repo PATH"
         ) from exc
 
@@ -267,7 +267,7 @@ def branch_name(run: Run) -> str:
     """A branch name carrying the run's own name and a short form of its id."""
     short = run.info.run_id[:8]
     name = _slug(run.info.run_name or "")
-    return f"exp-track/{name}-{short}" if name else f"exp-track/{short}"
+    return f"runsnap/{name}-{short}" if name else f"runsnap/{short}"
 
 
 def _slug(name: str) -> str:
@@ -357,7 +357,7 @@ def checkout(
 
     tree = _reconstruct(root, target_path, target_branch, base, patch, worktree, force)
     if commit:
-        commit_all(tree, f"exp-track: code state of run {run.info.run_id}")
+        commit_all(tree, f"runsnap: code state of run {run.info.run_id}")
 
     print(f"branch: {target_branch}")
     print(f"commit: {base}")
@@ -395,9 +395,9 @@ def _reconstruct(
 
 
 def main() -> None:
-    """Entry point of the `exp-track` command."""
+    """Entry point of the `runsnap` command."""
     try:
         app(sys.argv[1:])
     except CliError as exc:
-        print(f"exp-track: {exc}", file=sys.stderr)
+        print(f"runsnap: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

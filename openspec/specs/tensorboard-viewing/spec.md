@@ -6,21 +6,21 @@ Turns a set of MLflow runs into a TensorBoard log directory and opens TensorBoar
 
 ### Requirement: Runs are selected by MLflow query
 
-`exp-track tb` SHALL accept runs given as run ids or run names, as a whole experiment, and as an MLflow filter expression, and SHALL open TensorBoard on the runs that match. When nothing matches, it SHALL report that and exit without launching TensorBoard.
+`runsnap tb` SHALL accept runs given as run ids or run names, as a whole experiment, and as an MLflow filter expression, and SHALL open TensorBoard on the runs that match. When nothing matches, it SHALL report that and exit without launching TensorBoard.
 
 #### Scenario: Explicit runs
 
-- **WHEN** a user runs `exp-track tb baseline ablation-nodropout`
+- **WHEN** a user runs `runsnap tb baseline ablation-nodropout`
 - **THEN** TensorBoard opens showing those two runs
 
 #### Scenario: Whole experiment
 
-- **WHEN** a user runs `exp-track tb --experiment ablations`
+- **WHEN** a user runs `runsnap tb --experiment ablations`
 - **THEN** TensorBoard opens showing every run in that experiment that has TensorBoard data
 
 #### Scenario: Filtered query
 
-- **WHEN** a user runs `exp-track tb --experiment ablations --filter "params.optimizer = 'adamw'"`
+- **WHEN** a user runs `runsnap tb --experiment ablations --filter "params.optimizer = 'adamw'"`
 - **THEN** only the runs matching that filter are shown
 
 #### Scenario: No matching runs
@@ -53,7 +53,7 @@ By default the command SHALL download only each run's scalar data. Media SHALL b
 
 #### Scenario: Default is scalars only
 
-- **WHEN** `exp-track tb --experiment ablations` selects runs that logged images and histograms
+- **WHEN** `runsnap tb --experiment ablations` selects runs that logged images and histograms
 - **THEN** only the scalar event files are downloaded, and TensorBoard shows the scalar curves for every selected run
 
 #### Scenario: Media requested
@@ -67,7 +67,7 @@ Downloaded event files SHALL be cached on disk, keyed by run, and reused on late
 
 #### Scenario: Second invocation is cheap
 
-- **WHEN** `exp-track tb` is run twice over the same finished runs
+- **WHEN** `runsnap tb` is run twice over the same finished runs
 - **THEN** the second invocation downloads nothing and starts TensorBoard from the cache
 
 #### Scenario: In-progress run picks up new data

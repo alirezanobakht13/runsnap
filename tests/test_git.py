@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from conftest import GitRepo
 
-from exp_track._git import (
+from runsnap._git import (
     GitError,
     add_worktree,
     apply_patch,

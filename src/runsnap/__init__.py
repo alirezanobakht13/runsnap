@@ -4,9 +4,9 @@ from typing import Any
 
 import mlflow
 
-from exp_track._capture import capture, capture_enabled
-from exp_track._params import load_params, log_params
-from exp_track._tensorboard import tensorboard
+from runsnap._capture import capture, capture_enabled
+from runsnap._params import load_params, log_params
+from runsnap._tensorboard import tensorboard
 
 __all__ = ["load_params", "log_params", "start_run", "tensorboard"]
 
@@ -19,7 +19,7 @@ def start_run(*args: Any, capture_code: bool = True, **kwargs: Any) -> Any:
     everything downstream is stock MLflow.
 
     Capture is skipped when `capture_code` is false or the environment sets
-    `EXP_TRACK_CAPTURE_CODE=0`, and never raises into the caller.
+    `RUNSNAP_CAPTURE_CODE=0`, and never raises into the caller.
     """
     run = mlflow.start_run(*args, **kwargs)
     if capture_code and capture_enabled():

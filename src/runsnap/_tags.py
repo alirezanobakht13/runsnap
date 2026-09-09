@@ -1,6 +1,6 @@
 """Names and limits for what a captured run records."""
 
-TAG_PREFIX = "exp_track.git."
+TAG_PREFIX = "runsnap.git."
 
 TAG_COMMIT = f"{TAG_PREFIX}commit"
 TAG_BRANCH = f"{TAG_PREFIX}branch"
@@ -32,10 +32,10 @@ def hparams_artifact_path(name: str) -> str:
 
 DEFAULT_MAX_PATCH_BYTES = 10 * 1024 * 1024
 
-ENV_CAPTURE_CODE = "EXP_TRACK_CAPTURE_CODE"
-ENV_MAX_PATCH_BYTES = "EXP_TRACK_MAX_PATCH_BYTES"
+ENV_CAPTURE_CODE = "RUNSNAP_CAPTURE_CODE"
+ENV_MAX_PATCH_BYTES = "RUNSNAP_MAX_PATCH_BYTES"
 
-TB_TAG_LOGDIR = "exp_track.tb.logdir"
+TB_TAG_LOGDIR = "runsnap.tb.logdir"
 
 TB_ARTIFACT_DIR = "tb"
 TB_LIGHT_SUFFIX = ".scalars"

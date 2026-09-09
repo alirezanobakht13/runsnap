@@ -12,7 +12,7 @@ from mlflow.tracking import MlflowClient
 from mlflow.utils.validation import MAX_PARAM_VAL_LENGTH
 from pydantic import BaseModel
 
-from exp_track._tags import (
+from runsnap._tags import (
     HPARAMS_CLASS_KEY,
     HPARAMS_DATA_KEY,
     HPARAMS_DEFAULT_NAME,

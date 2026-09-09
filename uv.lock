@@ -644,35 +644,6 @@ wheels = [
 ]
 
 [[package]]
-name = "exp-track"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "cyclopts" },
-    { name = "mlflow" },
-    { name = "pydantic" },
-    { name = "tensorboard" },
-    { name = "tensorboardx" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "cyclopts", specifier = ">=4" },
-    { name = "mlflow", specifier = ">=3.16.0" },
-    { name = "pydantic", specifier = ">=2" },
-    { name = "tensorboard", specifier = ">=2.21.0" },
-    { name = "tensorboardx", specifier = ">=2.6.5" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.1.1" }]
-
-[[package]]
 name = "fastapi"
 version = "0.141.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2278,6 +2249,35 @@ sdist = { url = "https://files.pythonhosted.org/packages/e2/d6/d0b9fafc73b657672
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/68/1fc93dd759605b5d00fc98b50200739e41ed32bd22d6ba35ca6c3932371b/rich_rst-2.1.0-py3-none-any.whl", hash = "sha256:7ecd1343ee12c879d0e7ae74c3eb6d263b023d2929c6d114212eb1fd91057255", size = 272987, upload-time = "2026-07-05T02:59:42.792Z" },
 ]
+
+[[package]]
+name = "runsnap"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "cyclopts" },
+    { name = "mlflow" },
+    { name = "pydantic" },
+    { name = "tensorboard" },
+    { name = "tensorboardx" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cyclopts", specifier = ">=4" },
+    { name = "mlflow", specifier = ">=3.16.0" },
+    { name = "pydantic", specifier = ">=2" },
+    { name = "tensorboard", specifier = ">=2.21.0" },
+    { name = "tensorboardx", specifier = ">=2.6.5" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "scikit-learn"

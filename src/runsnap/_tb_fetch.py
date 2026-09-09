@@ -11,7 +11,7 @@ from tempfile import TemporaryDirectory
 from mlflow.entities import FileInfo, Run
 from mlflow.tracking import MlflowClient
 
-from exp_track._tags import TB_ARTIFACT_DIR, TB_LIGHT_SUFFIX
+from runsnap._tags import TB_ARTIFACT_DIR, TB_LIGHT_SUFFIX
 
 
 def fetch_run(
@@ -28,7 +28,7 @@ def fetch_run(
     """
     if cache_dir is None:
         cache_dir = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-        cache_dir = cache_dir / "exp-track" / "tensorboard"
+        cache_dir = cache_dir / "runsnap" / "tensorboard"
     logdir = cache_dir.resolve() / run_id / "events"
     logdir.mkdir(parents=True, exist_ok=True)
     light_dir = logdir.parent / "scalars"
@@ -91,7 +91,7 @@ def assemble_logdir(
     }
     counts = Counter(names.values())
     reserved = set(names.values())
-    with TemporaryDirectory(prefix="exp-track-tb-") as tmp:
+    with TemporaryDirectory(prefix="runsnap-tb-") as tmp:
         logdir = Path(tmp)
         for run_id, name in names.items():
             if counts[name] > 1:

@@ -9,8 +9,8 @@ from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-from exp_track._tb_fetch import assemble_logdir, fetch_run
-from exp_track._tensorboard import TensorBoardWriter
+from runsnap._tb_fetch import assemble_logdir, fetch_run
+from runsnap._tensorboard import TensorBoardWriter
 
 LIGHT = "events.out.tfevents.1.host.scalars"
 MEDIA = "events.out.tfevents.1.host.media.0"
@@ -115,7 +115,7 @@ def test_default_cache_respects_xdg_cache_home(tracking, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
     logdir = fetch_run(tracking, run.info.run_id)
     assert logdir == (
-        tmp_path / "xdg" / "exp-track" / "tensorboard" / run.info.run_id / "scalars"
+        tmp_path / "xdg" / "runsnap" / "tensorboard" / run.info.run_id / "scalars"
     )
 
 

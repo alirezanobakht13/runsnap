@@ -8,14 +8,14 @@ import pytest
 from mlflow.tracking import MlflowClient
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-import exp_track
-from exp_track._tags import (
+import runsnap
+from runsnap._tags import (
     TB_ARTIFACT_DIR,
     TB_LIGHT_SUFFIX,
     TB_MEDIA_SUFFIX,
     TB_TAG_LOGDIR,
 )
-from exp_track._tensorboard import TensorBoardWriter
+from runsnap._tensorboard import TensorBoardWriter
 
 
 def event_files(logdir: Path) -> list[Path]:
@@ -195,9 +195,9 @@ def wait_for_shards(client, run_id: str, count: int, timeout: float = 20.0):
 
 
 def test_sealed_shards_upload_before_the_run_ends(tracking):
-    with exp_track.start_run(capture_code=False) as run:
+    with runsnap.start_run(capture_code=False) as run:
         run_id = run.info.run_id
-        with exp_track.tensorboard(
+        with runsnap.tensorboard(
             shard_max_bytes=16 * 1024, sync_interval=0.05
         ) as writer:
             for step in range(40):
@@ -217,8 +217,8 @@ def test_sealed_shard_is_not_uploaded_twice(tracking, monkeypatch):
     monkeypatch.setattr(MlflowClient, "log_artifact", spy)
 
     with (
-        exp_track.start_run(capture_code=False) as run,
-        exp_track.tensorboard(shard_max_bytes=16 * 1024, sync_interval=0.05) as writer,
+        runsnap.start_run(capture_code=False) as run,
+        runsnap.tensorboard(shard_max_bytes=16 * 1024, sync_interval=0.05) as writer,
     ):
         for step in range(40):
             writer.add_image("train/sample", image(), step)
@@ -232,8 +232,8 @@ def test_sealed_shard_is_not_uploaded_twice(tracking, monkeypatch):
 
 def test_logdir_tag_is_set_on_entry(tracking):
     with (
-        exp_track.start_run(capture_code=False) as run,
-        exp_track.tensorboard(sync_interval=60.0),
+        runsnap.start_run(capture_code=False) as run,
+        runsnap.tensorboard(sync_interval=60.0),
     ):
         tags = tracking.get_run(run.info.run_id).data.tags
         assert tags[TB_TAG_LOGDIR] == TB_ARTIFACT_DIR
@@ -255,8 +255,8 @@ def write_some(writer) -> None:
 
 
 def test_normal_exit_uploads_everything(tracking, tmp_path):
-    with exp_track.start_run(capture_code=False) as run:
-        with exp_track.tensorboard(sync_interval=60.0) as writer:
+    with runsnap.start_run(capture_code=False) as run:
+        with runsnap.tensorboard(sync_interval=60.0) as writer:
             write_some(writer)
         assert uploaded_scalars(tracking, run.info.run_id, tmp_path) == list(range(10))
 
@@ -264,11 +264,11 @@ def test_normal_exit_uploads_everything(tracking, tmp_path):
 @pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
 def test_exit_by_raising_uploads_everything(tracking, tmp_path, failure):
     def interrupted_logging():
-        with exp_track.tensorboard(sync_interval=60.0) as writer:
+        with runsnap.tensorboard(sync_interval=60.0) as writer:
             write_some(writer)
             raise failure("stop")
 
-    with exp_track.start_run(capture_code=False) as run:
+    with runsnap.start_run(capture_code=False) as run:
         with pytest.raises(failure):
             interrupted_logging()
         assert uploaded_scalars(tracking, run.info.run_id, tmp_path) == list(range(10))
@@ -279,7 +279,7 @@ def test_unreachable_tracking_server_does_not_reach_user_code(tracking, monkeypa
         raise ConnectionError("tracking server unreachable")
 
     def logging_while_unreachable():
-        with exp_track.tensorboard(sync_interval=0.05) as writer:
+        with runsnap.tensorboard(sync_interval=0.05) as writer:
             write_some(writer)
             time.sleep(0.2)
         return True
@@ -287,7 +287,7 @@ def test_unreachable_tracking_server_does_not_reach_user_code(tracking, monkeypa
     monkeypatch.setattr(MlflowClient, "log_artifact", refuse)
     monkeypatch.setattr(MlflowClient, "set_tag", refuse)
     with (
-        exp_track.start_run(capture_code=False),
+        runsnap.start_run(capture_code=False),
         pytest.warns(UserWarning, match="tracking server unreachable"),
     ):
         reached_the_end = logging_while_unreachable()
@@ -297,7 +297,7 @@ def test_unreachable_tracking_server_does_not_reach_user_code(tracking, monkeypa
 
 def test_failing_upload_at_exit_does_not_raise(tracking, monkeypatch):
     def logging_with_failed_exit_upload():
-        with exp_track.tensorboard(sync_interval=60.0) as writer:
+        with runsnap.tensorboard(sync_interval=60.0) as writer:
             write_some(writer)
             monkeypatch.setattr(
                 MlflowClient,
@@ -307,7 +307,7 @@ def test_failing_upload_at_exit_does_not_raise(tracking, monkeypatch):
         return True
 
     with (
-        exp_track.start_run(capture_code=False),
+        runsnap.start_run(capture_code=False),
         pytest.warns(UserWarning, match="upload failed"),
     ):
         reached_the_end = logging_with_failed_exit_upload()
@@ -327,6 +327,6 @@ def test_write_failure_does_not_reach_user_code(logdir):
 def test_no_active_run_raises_a_named_error(tracking):
     with (
         pytest.raises(RuntimeError, match="active MLflow run"),
-        exp_track.tensorboard(),
+        runsnap.tensorboard(),
     ):
         pass

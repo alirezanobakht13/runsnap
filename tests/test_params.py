@@ -7,8 +7,8 @@ import mlflow
 import pytest
 from pydantic import BaseModel, ValidationError
 
-import exp_track
-from exp_track._params import flatten_model
+import runsnap
+from runsnap._params import flatten_model
 
 
 def artifact_paths(client: mlflow.MlflowClient, run_id: str) -> set[str]:
@@ -106,7 +106,7 @@ def test_prefix_namespaces_every_key():
 def test_logs_params_and_artifact_to_the_active_run(tracking):
     hp = HParams(seed=7)
     with mlflow.start_run() as run:
-        exp_track.log_params(hp)
+        runsnap.log_params(hp)
     run_id = run.info.run_id
 
     params = tracking.get_run(run_id).data.params
@@ -121,19 +121,19 @@ def test_logs_params_and_artifact_to_the_active_run(tracking):
 def test_logs_to_a_run_named_explicitly(tracking):
     with mlflow.start_run() as run:
         pass
-    exp_track.log_params(HParams(seed=3), run_id=run.info.run_id)
+    runsnap.log_params(HParams(seed=3), run_id=run.info.run_id)
     assert tracking.get_run(run.info.run_id).data.params["seed"] == "3"
 
 
 def test_rejects_non_pydantic_input(tracking):
     with mlflow.start_run(), pytest.raises(TypeError, match="BaseModel"):
-        exp_track.log_params({"seed": 42})  # ty: ignore[invalid-argument-type]
+        runsnap.log_params({"seed": 42})  # ty: ignore[invalid-argument-type]
 
 
 def test_named_models_get_distinct_artifacts(tracking):
     with mlflow.start_run() as run:
-        exp_track.log_params(HParams(), name="model", prefix="model")
-        exp_track.log_params(Trainer(), name="data", prefix="data")
+        runsnap.log_params(HParams(), name="model", prefix="model")
+        runsnap.log_params(Trainer(), name="data", prefix="data")
     run_id = run.info.run_id
 
     assert artifact_paths(tracking, run_id) == {
@@ -149,8 +149,8 @@ def test_named_models_get_distinct_artifacts(tracking):
 
 def test_prefixes_keep_shared_field_names_apart(tracking):
     with mlflow.start_run() as run:
-        exp_track.log_params(Optimizer(lr=0.1), name="a", prefix="a")
-        exp_track.log_params(Optimizer(lr=0.2), name="b", prefix="b")
+        runsnap.log_params(Optimizer(lr=0.1), name="a", prefix="a")
+        runsnap.log_params(Optimizer(lr=0.2), name="b", prefix="b")
     params = tracking.get_run(run.info.run_id).data.params
     assert params == {"a.lr": "0.1", "b.lr": "0.2"}
 
@@ -161,7 +161,7 @@ def test_warns_when_a_value_exceeds_mlflows_param_limit(tracking):
 
     hp = Wide(notes=["x" * 100] * 100)
     with mlflow.start_run() as run, pytest.warns(UserWarning, match="notes"):
-        exp_track.log_params(hp)
+        runsnap.log_params(hp)
 
     payload = read_artifact(tracking, run.info.run_id, "hparams/params.json")
     assert payload["data"] == hp.model_dump(mode="json")
@@ -170,8 +170,8 @@ def test_warns_when_a_value_exceeds_mlflows_param_limit(tracking):
 def test_round_trips_through_load_params(tracking):
     hp = HParams(seed=11, opt=Optimizer(lr=0.5))
     with mlflow.start_run() as run:
-        exp_track.log_params(hp)
-    assert exp_track.load_params(run.info.run_id, HParams) == hp
+        runsnap.log_params(hp)
+    assert runsnap.load_params(run.info.run_id, HParams) == hp
 
 
 def test_load_params_warns_on_class_mismatch(tracking):
@@ -180,9 +180,9 @@ def test_load_params_warns_on_class_mismatch(tracking):
         opt: Optimizer = Optimizer()
 
     with mlflow.start_run() as run:
-        exp_track.log_params(HParams(seed=5))
+        runsnap.log_params(HParams(seed=5))
     with pytest.warns(UserWarning, match="HParams"):
-        loaded = exp_track.load_params(run.info.run_id, Renamed)
+        loaded = runsnap.load_params(run.info.run_id, Renamed)
     assert loaded.seed == 5
 
 
@@ -191,9 +191,9 @@ def test_load_params_raises_pydantics_validation_error(tracking):
         seed: dict[str, int]
 
     with mlflow.start_run() as run:
-        exp_track.log_params(HParams())
+        runsnap.log_params(HParams())
     with pytest.warns(UserWarning), pytest.raises(ValidationError):
-        exp_track.load_params(run.info.run_id, Incompatible)
+        runsnap.load_params(run.info.run_id, Incompatible)
 
 
 def test_load_params_reports_a_missing_artifact(tracking):
@@ -201,4 +201,4 @@ def test_load_params_reports_a_missing_artifact(tracking):
         pass
     run_id = run.info.run_id
     with pytest.raises(FileNotFoundError, match=f"{run_id}.*hparams/absent.json"):
-        exp_track.load_params(run_id, HParams, name="absent")
+        runsnap.load_params(run_id, HParams, name="absent")

@@ -14,7 +14,7 @@ import mlflow
 from mlflow.tracking import MlflowClient
 from tensorboardX import SummaryWriter
 
-from exp_track._tags import (
+from runsnap._tags import (
     TB_ARTIFACT_DIR,
     TB_HISTOGRAM_BINS,
     TB_LIGHT_SUFFIX,
@@ -170,7 +170,7 @@ def _warn_instead_of_raising(action: str) -> Iterator[None]:
     try:
         yield
     except Exception as exc:  # noqa: BLE001 - logging must never fail the run
-        warnings.warn(f"exp_track could not {action}: {exc}", stacklevel=3)
+        warnings.warn(f"runsnap could not {action}: {exc}", stacklevel=3)
 
 
 class _Sync:
@@ -197,7 +197,7 @@ class _Sync:
         self._uploaded: dict[str, int] = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(
-            target=self._loop, name="exp_track-tb-sync", daemon=True
+            target=self._loop, name="runsnap-tb-sync", daemon=True
         )
 
     def start(self) -> None:
@@ -266,7 +266,7 @@ def tensorboard(
     """
     resolved = run_id or _active_run_id()
     client = MlflowClient()
-    logdir = tempfile.mkdtemp(prefix="exp_track-tb-")
+    logdir = tempfile.mkdtemp(prefix="runsnap-tb-")
     writer = TensorBoardWriter(logdir, shard_max_bytes=shard_max_bytes, **kwargs)
     sync = _Sync(client, resolved, writer, interval=sync_interval)
     with _warn_instead_of_raising(f"tag the run with {TB_TAG_LOGDIR}"):
@@ -287,7 +287,7 @@ def _active_run_id() -> str:
     run = mlflow.active_run()
     if run is None:
         raise RuntimeError(
-            "exp_track.tensorboard() needs an active MLflow run; "
-            "start one with exp_track.start_run() or pass run_id="
+            "runsnap.tensorboard() needs an active MLflow run; "
+            "start one with runsnap.start_run() or pass run_id="
         )
     return run.info.run_id

@@ -6,16 +6,16 @@ Lets hyperparameters defined as Pydantic models be logged to an MLflow run witho
 
 ### Requirement: Pydantic models can be logged as params
 
-`exp_track.log_params()` SHALL accept a Pydantic model instance and log its fields as MLflow params on the active run, or on a run named explicitly. Passing a value that is not a Pydantic model SHALL raise `TypeError`.
+`runsnap.log_params()` SHALL accept a Pydantic model instance and log its fields as MLflow params on the active run, or on a run named explicitly. Passing a value that is not a Pydantic model SHALL raise `TypeError`.
 
 #### Scenario: Model logged to the active run
 
-- **WHEN** a user calls `exp_track.log_params(hp)` inside an active run, where `hp` is a Pydantic model with field `seed = 42`
+- **WHEN** a user calls `runsnap.log_params(hp)` inside an active run, where `hp` is a Pydantic model with field `seed = 42`
 - **THEN** the run has param `seed` with value `42`
 
 #### Scenario: Non-model rejected
 
-- **WHEN** a user calls `exp_track.log_params({"seed": 42})`
+- **WHEN** a user calls `runsnap.log_params({"seed": 42})`
 - **THEN** a `TypeError` is raised naming the expected type
 
 ### Requirement: Nested models flatten to dotted param names
@@ -63,16 +63,16 @@ Leaf values SHALL be encoded by one rule: strings are logged verbatim, and every
 
 ### Requirement: The full model is stored as a round-trippable artifact
 
-`exp_track.log_params()` SHALL additionally write the model's complete JSON serialization as a run artifact, together with the fully qualified name of the model class. The artifact SHALL be the authoritative record, preserving values that the flattened params encode lossily or truncate.
+`runsnap.log_params()` SHALL additionally write the model's complete JSON serialization as a run artifact, together with the fully qualified name of the model class. The artifact SHALL be the authoritative record, preserving values that the flattened params encode lossily or truncate.
 
 #### Scenario: Artifact written
 
-- **WHEN** a user calls `exp_track.log_params(hp)`
+- **WHEN** a user calls `runsnap.log_params(hp)`
 - **THEN** the run has an artifact under `hparams/` containing the model's serialized data and the fully qualified name of its class
 
 #### Scenario: Multiple models on one run
 
-- **WHEN** a user calls `exp_track.log_params(model_hp, name="model")` and `exp_track.log_params(data_hp, name="data")` on the same run
+- **WHEN** a user calls `runsnap.log_params(model_hp, name="model")` and `runsnap.log_params(data_hp, name="data")` on the same run
 - **THEN** the run has two distinct artifacts, `hparams/model.json` and `hparams/data.json`
 
 #### Scenario: Param key collision avoided
@@ -82,11 +82,11 @@ Leaf values SHALL be encoded by one rule: strings are logged verbatim, and every
 
 ### Requirement: Logged models can be reloaded into their class
 
-`exp_track.load_params()` SHALL reconstruct a logged model from a run by downloading its artifact and validating it against a caller-supplied model class, returning a fully typed instance.
+`runsnap.load_params()` SHALL reconstruct a logged model from a run by downloading its artifact and validating it against a caller-supplied model class, returning a fully typed instance.
 
 #### Scenario: Round trip
 
-- **WHEN** a user logs a model to a run and later calls `exp_track.load_params(run_id, HParams)`
+- **WHEN** a user logs a model to a run and later calls `runsnap.load_params(run_id, HParams)`
 - **THEN** an `HParams` instance equal to the original is returned
 
 #### Scenario: Class mismatch
