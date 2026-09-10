@@ -227,12 +227,11 @@ def test_unexpected_git_failure_does_not_escape(
     assert "catastrophe" in tags(tracking, run_id)[TAG_CAPTURE_ERROR]
 
 
-def test_start_run_forwards_arguments_and_returns_mlflows_run(
-    in_repo: GitRepo, tracking
-):
+def test_start_run_forwards_arguments_and_wraps_mlflows_run(in_repo: GitRepo, tracking):
     with runsnap.start_run(run_name="named", tags={"custom": "value"}) as run:
         assert isinstance(run, mlflow.ActiveRun)
-        assert run is mlflow.active_run()
+        active = mlflow.active_run()
+        assert active is not None and active.info.run_id == run.info.run_id
         run_id = run.info.run_id
         mlflow.log_metric("score", 1.0)
 

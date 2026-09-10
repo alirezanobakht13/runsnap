@@ -29,6 +29,26 @@ patch with `RUNSNAP_MAX_PATCH_BYTES` (10 MiB).
 **The patch carries uncommitted content of tracked files, so a secret in one is
 uploaded to the tracking server.** Ignored files are excluded.
 
+## Run lifecycle
+
+Leaving a `start_run` block records how it ended. A `KeyboardInterrupt` ends the
+run as `KILLED` rather than `FAILED`, so an interrupted attempt is told apart
+from a crash by `attributes.status`. Either way the run carries tag
+`runsnap.failure.cause` holding the exception's type and message, and the
+exception still reaches the caller.
+
+```python
+with runsnap.start_run(continues=previous_run_id):  # resumes an earlier attempt
+    ...
+runsnap.attempt_chain(run_id)  # [run_id, ..., first attempt]
+```
+
+`continues` records tag `runsnap.continues` naming the attempt a run resumes,
+independent of MLflow nesting, and `attempt_chain` walks that tag back to the
+first attempt. `runsnap show` prints a `continues:` line for a run that has one,
+and `runsnap tb --chain` adds each selected run's earlier attempts so a resumed
+training draws as one set of curves.
+
 ## TensorBoard
 
 Use `runsnap.tensorboard()` inside an active MLflow run to log TensorBoard
@@ -46,6 +66,7 @@ with runsnap.start_run(run_name="baseline") as run:
     with runsnap.tensorboard() as writer:
         for step in range(10):
             writer.add_scalar("train/loss", 1.0 / (step + 1), step)
+            writer.add_record("eval", {"score": step, "solved": step > 4}, step)
         writer.add_text("notes", "Baseline run", 0)
         writer.add_image("sample", np.zeros((3, 32, 32)), 0)
         writer.add_histogram("weights", np.linspace(-1, 1, 100), 0)
@@ -56,6 +77,14 @@ The writer uploads event files without copying scalars into MLflow metrics.
 Histograms default to 30 bins; pass `bins=` to override. Leaving the writer
 block flushes and uploads pending events, including on exceptions and Ctrl-C.
 
+`add_record` charts a whole record — a mapping, a dataclass instance, or a
+Pydantic model — as one scalar per leaf, so the call above draws `eval/score`
+and `eval/solved`, and a nested `actor` field would draw `eval/actor.entropy`.
+`runsnap.flatten_metrics(record)` returns that same `{key: number}` mapping for
+`mlflow.log_metrics`. Booleans become `0` / `1`, `None` and strings are dropped,
+and `NaN` and infinities are kept so a divergence shows as a gap in the curve; a
+field holding more than one number raises, naming the field.
+
 Use the same `MLFLOW_TRACKING_URI` for logging and viewing (or pass
 `--tracking-uri` to the CLI):
 
@@ -65,6 +94,7 @@ runsnap tb baseline ablation-nodropout      # compare named runs
 runsnap tb --experiment ablations
 runsnap tb --experiment ablations --filter "params.optimizer = 'adamw'"
 runsnap tb baseline --media                # include images and histograms
+runsnap tb baseline --chain                # add the attempts it continues
 ```
 
 By default, the viewer fetches only the light event files containing scalars

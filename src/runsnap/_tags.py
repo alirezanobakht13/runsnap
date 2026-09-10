@@ -10,6 +10,9 @@ TAG_PATCH_SHA256 = f"{TAG_PREFIX}patch_sha256"
 TAG_PATCH_RUN_ID = f"{TAG_PREFIX}patch_run_id"
 TAG_CAPTURE_ERROR = f"{TAG_PREFIX}capture_error"
 
+TAG_FAILURE_CAUSE = "runsnap.failure.cause"
+TAG_CONTINUES = "runsnap.continues"
+
 MLFLOW_TAG_COMMIT = "mlflow.source.git.commit"
 MLFLOW_TAG_BRANCH = "mlflow.source.git.branch"
 MLFLOW_TAG_DIRTY = "mlflow.source.git.dirty"

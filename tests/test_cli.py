@@ -141,6 +141,30 @@ def test_show_on_a_clean_run_reports_no_patch(
     assert "files:" not in printed
 
 
+def test_show_prints_the_attempt_a_run_continues(
+    in_repo: GitRepo, tracking, capsys
+) -> None:
+    with runsnap.start_run() as first:
+        first_id = first.info.run_id
+    with runsnap.start_run(continues=first_id) as second:
+        second_id = second.info.run_id
+
+    show(second_id)
+
+    assert f"continues: {first_id}" in capsys.readouterr().out
+
+
+def test_show_on_a_first_attempt_prints_no_lineage(
+    in_repo: GitRepo, tracking, capsys
+) -> None:
+    with runsnap.start_run() as active:
+        run_id = active.info.run_id
+
+    show(run_id)
+
+    assert "continues:" not in capsys.readouterr().out
+
+
 def test_show_rejects_a_run_without_code_state(tracking) -> None:
     with mlflow.start_run() as active:
         run_id = active.info.run_id

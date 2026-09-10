@@ -27,10 +27,12 @@ from runsnap._git import (
     patch_files,
     remove_worktree,
 )
+from runsnap._lifecycle import attempt_chain
 from runsnap._tags import (
     PATCH_ARTIFACT_PATH,
     TAG_BRANCH,
     TAG_COMMIT,
+    TAG_CONTINUES,
     TAG_DIRTY,
     TAG_PATCH_RUN_ID,
     TAG_PATCH_SHA256,
@@ -138,11 +140,22 @@ def _tb_runs(
             return matches
 
 
+def _with_chains(client: MlflowClient, runs: list[Run]) -> list[Run]:
+    """`runs` followed by every attempt they continue, each run appearing once."""
+    extended = {run.info.run_id: run for run in runs}
+    for run in runs:
+        for run_id in attempt_chain(run.info.run_id, client):
+            if run_id not in extended:
+                extended[run_id] = client.get_run(run_id)
+    return list(extended.values())
+
+
 @app.command
 def tb(
     *run_refs: str,
     experiment: str | None = None,
     filter: str = "",
+    chain: bool = False,
     media: bool = False,
     tracking_uri: str | None = None,
 ) -> None:
@@ -156,6 +169,8 @@ def tb(
         Experiment name, defaulting to all experiments.
     filter
         MLflow filter expression to narrow the selected runs.
+    chain
+        Also show every earlier attempt each selected run continues.
     media
         Include images, histograms, and other media alongside scalar data.
     tracking_uri
@@ -163,6 +178,8 @@ def tb(
     """
     client = make_client(tracking_uri)
     runs = _tb_runs(client, run_refs, experiment, filter)
+    if chain:
+        runs = _with_chains(client, runs)
     with assemble_logdir(client, runs, media=media) as logdir:
         if not any(logdir.iterdir()):
             print("No runs found with TensorBoard data matching the selection.")
@@ -238,6 +255,8 @@ def show(
     dirty = tags.get(TAG_DIRTY) == "true"
     print(f"run:     {run.info.run_id}")
     print(f"name:    {run.info.run_name}")
+    if TAG_CONTINUES in tags:
+        print(f"continues: {tags[TAG_CONTINUES]}")
     print(f"commit:  {tags[TAG_COMMIT]}")
     print(f"branch:  {tags.get(TAG_BRANCH, '(detached)')}")
     print(f"dirty:   {'true' if dirty else 'false'}")

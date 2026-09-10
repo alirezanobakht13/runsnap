@@ -11,6 +11,7 @@ from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 
 from runsnap import _cli
+from runsnap._tags import TAG_CONTINUES
 
 LIGHT = "events.out.tfevents.1.host.scalars"
 MEDIA = "events.out.tfevents.1.host.media.0"
@@ -23,6 +24,7 @@ def logged_run(
     *,
     experiment_id: str | None = None,
     optimizer: str = "adamw",
+    continues: str | None = None,
 ) -> Run:
     with mlflow.start_run(run_name=name, experiment_id=experiment_id) as active:
         source = tmp_path / "source"
@@ -30,6 +32,8 @@ def logged_run(
         (source / LIGHT).write_bytes(b"scalar events")
         (source / MEDIA).write_bytes(b"media events")
         mlflow.log_param("optimizer", optimizer)
+        if continues is not None:
+            mlflow.set_tag(TAG_CONTINUES, continues)
         client.log_artifacts(active.info.run_id, str(source), "tb")
         return client.get_run(active.info.run_id)
 
@@ -131,6 +135,49 @@ def test_experiment_resolves_duplicate_names(
     assert {path.name for path in (cache / "runsnap" / "tensorboard").iterdir()} == {
         wanted.info.run_id
     }
+
+
+def test_chain_pulls_in_earlier_attempts(
+    tracking, tmp_path, cache, viewer, monkeypatch
+):
+    first = logged_run(tracking, tmp_path, "attempt-1")
+    second = logged_run(tracking, tmp_path, "attempt-2", continues=first.info.run_id)
+    logged_run(tracking, tmp_path, "attempt-3", continues=second.info.run_id)
+    logged_run(tracking, tmp_path, "unrelated")
+
+    invoke(monkeypatch, "attempt-3", "--chain")
+
+    assert set(viewer) == {"attempt-1", "attempt-2", "attempt-3"}
+
+
+def test_chain_extends_a_filtered_selection(
+    tracking, tmp_path, cache, viewer, monkeypatch
+):
+    first = logged_run(tracking, tmp_path, "attempt-1")
+    tracking.set_terminated(first.info.run_id, "KILLED")
+    logged_run(tracking, tmp_path, "attempt-2", continues=first.info.run_id)
+
+    invoke(
+        monkeypatch,
+        "--experiment",
+        "runsnap-tests",
+        "--filter",
+        "attributes.status = 'FINISHED'",
+        "--chain",
+    )
+
+    assert set(viewer) == {"attempt-1", "attempt-2"}
+
+
+def test_without_the_flag_only_the_named_run_is_shown(
+    tracking, tmp_path, cache, viewer, monkeypatch
+):
+    first = logged_run(tracking, tmp_path, "attempt-1")
+    logged_run(tracking, tmp_path, "attempt-2", continues=first.info.run_id)
+
+    invoke(monkeypatch, "attempt-2")
+
+    assert set(viewer) == {"attempt-2"}
 
 
 @pytest.mark.parametrize("selection", ["empty", "no-events", "filter"])

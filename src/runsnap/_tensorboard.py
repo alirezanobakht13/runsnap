@@ -14,6 +14,7 @@ import mlflow
 from mlflow.tracking import MlflowClient
 from tensorboardX import SummaryWriter
 
+from runsnap._metrics import flatten_metrics
 from runsnap._tags import (
     TB_ARTIFACT_DIR,
     TB_HISTOGRAM_BINS,
@@ -69,6 +70,27 @@ class TensorBoardWriter:
         """The media shard currently open for writing."""
         with self._lock:
             return _event_path(self._media)
+
+    def add_record(
+        self,
+        prefix: str,
+        record: Any,
+        global_step: int | None = None,
+        walltime: float | None = None,
+    ) -> None:
+        """Chart every number in a record, one scalar per leaf.
+
+        `record` is flattened by `runsnap.flatten_metrics()`, so a mapping, a
+        dataclass instance or a model all work and a nested record reads
+        `actor.entropy`; non-numeric fields are left out. Each entry is charted
+        as `prefix/<key>`, or `<key>` when `prefix` is empty.
+
+        Raises:
+            ValueError: A leaf holds more than one element, named by its key.
+        """
+        for key, value in flatten_metrics(record).items():
+            tag = f"{prefix}/{key}" if prefix else key
+            self._call_light("add_scalar", tag, value, global_step, walltime)
 
     def add_histogram(
         self,

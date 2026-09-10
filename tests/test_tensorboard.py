@@ -84,6 +84,61 @@ def accumulate_tags(event_file: Path) -> dict[str, list[str]]:
     return accumulator.Tags()
 
 
+def read_light(logdir: Path) -> EventAccumulator:
+    """The scalar event file, read in isolation from the media shards."""
+    light = next(p for p in event_files(logdir) if p.name.endswith(TB_LIGHT_SUFFIX))
+    accumulator = EventAccumulator(str(light))
+    accumulator.Reload()
+    return accumulator
+
+
+def test_record_charts_every_numeric_leaf(logdir: Path):
+    record = {"loss": 0.5, "kind": "train", "actor": {"entropy": 1.2}}
+
+    writer = TensorBoardWriter(logdir)
+    writer.add_record("train", record, 10)
+    writer.close()
+
+    light = read_light(logdir)
+    assert sorted(light.Tags()["scalars"]) == ["train/actor.entropy", "train/loss"]
+    assert [(p.step, p.value) for p in light.Scalars("train/loss")] == [(10, 0.5)]
+    assert [(p.step, p.value) for p in light.Scalars("train/actor.entropy")] == [
+        (10, pytest.approx(1.2))
+    ]
+
+
+def test_record_forwards_wall_time(logdir: Path):
+    writer = TensorBoardWriter(logdir)
+    writer.add_record("eval", {"loss": 0.5, "kl": 0.01}, 10, walltime=1700000000.0)
+    writer.close()
+
+    light = read_light(logdir)
+    points = [p for tag in light.Tags()["scalars"] for p in light.Scalars(tag)]
+    assert len(points) == 2
+    assert {p.wall_time for p in points} == {1700000000.0}
+
+
+def test_record_with_an_empty_prefix_charts_bare_keys(logdir: Path):
+    writer = TensorBoardWriter(logdir)
+    writer.add_record("", {"loss": 0.5}, 1)
+    writer.close()
+
+    assert read_light(logdir).Tags()["scalars"] == ["loss"]
+
+
+def test_records_stay_downloadable_without_media(logdir: Path):
+    writer = TensorBoardWriter(logdir)
+    for step in range(5):
+        writer.add_record("train", {"loss": 1.0 / (step + 1)}, step)
+        writer.add_image("train/sample", image(), step)
+    writer.close()
+
+    light = read_light(logdir)
+    assert [p.step for p in light.Scalars("train/loss")] == list(range(5))
+    assert light.Tags()["images"] == []
+    assert accumulate_tags(media_files(logdir)[0])["scalars"] == []
+
+
 def test_scalar_file_is_a_small_fraction_of_the_total(logdir: Path):
     writer = TensorBoardWriter(logdir)
     for step in range(20):
