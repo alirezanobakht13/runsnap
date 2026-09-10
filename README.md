@@ -97,13 +97,20 @@ runsnap tb baseline --media                # include images and histograms
 runsnap tb baseline --chain                # add the attempts it continues
 ```
 
-By default, the viewer fetches only the light event files containing scalars
-and text. `--media` also fetches images, histograms, and other media. Runs appear
-under their MLflow names; unchanged downloads are reused from a local cache.
-TensorBoard prints its URL and runs in the foreground until Ctrl-C. Each
-invocation fetches a snapshot; rerun the command to fetch newer uploads.
+For runs logged on the viewing host, the viewer uses the writer's local log
+directory while it exists. TensorBoard shows newly flushed events as training
+continues, including images, histograms, and other media regardless of `--media`.
+Runs logged on another host, or whose local directory is gone, use a snapshot
+of their uploaded artifacts: by default only scalars and text, with `--media`
+including other media. Rerun the command to fetch newer uploads for those runs.
+Live and cached runs appear together under their MLflow names; unchanged
+downloads are reused from a local cache. TensorBoard prints its URL and runs in
+the foreground until Ctrl-C. If a live writer block exits while the dashboard
+is open, rerun the command to view its final uploaded artifacts.
 
-During logging, the background thread waits 30 seconds between sync passes.
+During logging, writers flush events to local disk every 10 seconds by default;
+pass `runsnap.tensorboard(flush_secs=60)` to override the interval. The background
+thread waits 30 seconds between upload sync passes.
 Media rolls into shards after crossing 8 MiB; sealed shards become eligible for
 the next sync. An unannounced kill (`SIGKILL` or unhandled `SIGTERM`) keeps
 successfully uploaded data, but the open shard, pending sealed shards, and

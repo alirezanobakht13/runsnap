@@ -39,6 +39,8 @@ ENV_CAPTURE_CODE = "RUNSNAP_CAPTURE_CODE"
 ENV_MAX_PATCH_BYTES = "RUNSNAP_MAX_PATCH_BYTES"
 
 TB_TAG_LOGDIR = "runsnap.tb.logdir"
+TB_TAG_LOCAL_HOST = "runsnap.tb.local_host"
+TB_TAG_LOCAL_DIR = "runsnap.tb.local_dir"
 
 TB_ARTIFACT_DIR = "tb"
 TB_LIGHT_SUFFIX = ".scalars"
@@ -53,3 +55,4 @@ def tb_media_suffix(shard: int) -> str:
 TB_HISTOGRAM_BINS = 30
 TB_SHARD_MAX_BYTES = 8 * 1024 * 1024
 TB_SYNC_INTERVAL_SECONDS = 30.0
+TB_FLUSH_SECONDS = 10

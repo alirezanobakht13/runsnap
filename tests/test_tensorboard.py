@@ -1,5 +1,6 @@
 """Tests for the split, sharded TensorBoard writer."""
 
+import socket
 import time
 from pathlib import Path
 
@@ -7,12 +8,16 @@ import numpy as np
 import pytest
 from mlflow.tracking import MlflowClient
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+from tensorboardX.writer import FileWriter
 
 import runsnap
 from runsnap._tags import (
     TB_ARTIFACT_DIR,
+    TB_FLUSH_SECONDS,
     TB_LIGHT_SUFFIX,
     TB_MEDIA_SUFFIX,
+    TB_TAG_LOCAL_DIR,
+    TB_TAG_LOCAL_HOST,
     TB_TAG_LOGDIR,
 )
 from runsnap._tensorboard import TensorBoardWriter
@@ -292,6 +297,90 @@ def test_logdir_tag_is_set_on_entry(tracking):
     ):
         tags = tracking.get_run(run.info.run_id).data.tags
         assert tags[TB_TAG_LOGDIR] == TB_ARTIFACT_DIR
+
+
+def test_local_tags_name_the_live_log_directory(tracking):
+    with (
+        runsnap.start_run(capture_code=False) as run,
+        runsnap.tensorboard(sync_interval=60.0),
+    ):
+        tags = tracking.get_run(run.info.run_id).data.tags
+        assert tags[TB_TAG_LOCAL_HOST] == socket.gethostname()
+        local = Path(tags[TB_TAG_LOCAL_DIR])
+        assert local.is_absolute()
+        assert local.is_dir()
+        assert event_files(local)
+
+
+def test_local_tags_outlive_the_directory(tracking):
+    with runsnap.start_run(capture_code=False) as run:
+        with runsnap.tensorboard(sync_interval=60.0):
+            pass
+        tags = tracking.get_run(run.info.run_id).data.tags
+        assert tags[TB_TAG_LOCAL_HOST] == socket.gethostname()
+        assert not Path(tags[TB_TAG_LOCAL_DIR]).exists()
+
+
+def wait_for_scalar(logdir: Path, tag: str, timeout: float) -> list[int]:
+    """The steps of `tag` once the writer's own flushing has put them on disk.
+
+    Reading is retried because the writer hands events to a worker thread, so
+    a scalar reaches the file some time after the call that wrote it returns.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return [point.step for point in read_light(logdir).Scalars(tag)]
+        except KeyError:
+            if time.monotonic() > deadline:
+                raise AssertionError(f"{tag} never reached {logdir}") from None
+            time.sleep(0.05)
+
+
+def test_refused_tags_warn_and_still_yield_a_writer(tracking, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise ConnectionError("tags refused")
+
+    def logging_with_refused_tags():
+        with runsnap.tensorboard(sync_interval=60.0, flush_secs=0.05) as writer:
+            writer.add_scalar("train/loss", 0.5, 1)
+            assert wait_for_scalar(Path(writer.logdir), "train/loss", 10.0) == [1]
+
+    monkeypatch.setattr(MlflowClient, "set_tag", refuse)
+    with (
+        runsnap.start_run(capture_code=False),
+        pytest.warns(UserWarning, match="tags refused"),
+    ):
+        logging_with_refused_tags()
+
+
+def flush_intervals(writer: TensorBoardWriter) -> set[float]:
+    """The flush interval each of the two underlying writers is running with."""
+    intervals = set()
+    for underlying in (writer._light, writer._media):
+        file_writer = underlying.file_writer
+        assert isinstance(file_writer, FileWriter)
+        intervals.add(file_writer.event_writer._flush_secs)
+    return intervals
+
+
+def test_scalars_reach_disk_without_the_user_flushing(tracking):
+    with (
+        runsnap.start_run(capture_code=False),
+        runsnap.tensorboard(sync_interval=60.0) as writer,
+    ):
+        assert flush_intervals(writer) == {TB_FLUSH_SECONDS}
+        writer.add_scalar("train/loss", 0.5, 1)
+        steps = wait_for_scalar(Path(writer.logdir), "train/loss", 3 * TB_FLUSH_SECONDS)
+        assert steps == [1]
+
+
+def test_caller_flush_secs_reaches_the_writers(tracking):
+    with (
+        runsnap.start_run(capture_code=False),
+        runsnap.tensorboard(sync_interval=60.0, flush_secs=60) as writer,
+    ):
+        assert flush_intervals(writer) == {60}
 
 
 def uploaded_scalars(client, run_id: str, tmp_path: Path) -> list[int]:

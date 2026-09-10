@@ -2,6 +2,7 @@
 
 import os
 import re
+import socket
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -11,7 +12,12 @@ from tempfile import TemporaryDirectory
 from mlflow.entities import FileInfo, Run
 from mlflow.tracking import MlflowClient
 
-from runsnap._tags import TB_ARTIFACT_DIR, TB_LIGHT_SUFFIX
+from runsnap._tags import (
+    TB_ARTIFACT_DIR,
+    TB_LIGHT_SUFFIX,
+    TB_TAG_LOCAL_DIR,
+    TB_TAG_LOCAL_HOST,
+)
 
 
 def fetch_run(
@@ -75,18 +81,23 @@ def assemble_logdir(
 ) -> Iterator[Path]:
     """Yield a temporary directory of named links to cached runs.
 
+    A run still being written on this host is linked to the directory it is
+    being written to, so TensorBoard tails the growing files themselves; every
+    other run is downloaded into the cache first.
+
     Keep this context open while TensorBoard runs. Its links are removed on
     exit, while downloaded event files remain available for later invocations.
     Runs without event data are omitted.
     """
     selected = {run.info.run_id: run for run in runs}
-    cached = {
-        run_id: fetch_run(client, run_id, cache_dir=cache_dir, media=media)
-        for run_id in selected
+    paths = {
+        run_id: _live_logdir(run)
+        or fetch_run(client, run_id, cache_dir=cache_dir, media=media)
+        for run_id, run in selected.items()
     }
     names = {
         run_id: _run_name(selected[run_id])
-        for run_id, path in cached.items()
+        for run_id, path in paths.items()
         if any(path.rglob("events.out.tfevents.*"))
     }
     counts = Counter(names.values())
@@ -102,8 +113,23 @@ def assemble_logdir(
                     counter += 1
                     name = f"{base}-{run_id}-{counter}"
                 reserved.add(name)
-            (logdir / name).symlink_to(cached[run_id], target_is_directory=True)
+            (logdir / name).symlink_to(paths[run_id], target_is_directory=True)
         yield logdir
+
+
+def _live_logdir(run: Run) -> Path | None:
+    """Where `run` is writing its events on this host, if it still is.
+
+    A directory that is absent says the run is over, and one tagged with
+    another host says its events only reach here through the artifact store.
+    """
+    if run.data.tags.get(TB_TAG_LOCAL_HOST) != socket.gethostname():
+        return None
+    local = run.data.tags.get(TB_TAG_LOCAL_DIR)
+    if local is None:
+        return None
+    path = Path(local)
+    return path if path.is_dir() else None
 
 
 def _run_name(run: Run) -> str:

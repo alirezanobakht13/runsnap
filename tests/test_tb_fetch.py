@@ -1,5 +1,8 @@
 """Artifact cache and named TensorBoard log directory tests."""
 
+import shutil
+import socket
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +12,8 @@ from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
+import runsnap
+from runsnap._tags import TB_TAG_LOCAL_DIR, TB_TAG_LOCAL_HOST
 from runsnap._tb_fetch import assemble_logdir, fetch_run
 from runsnap._tensorboard import TensorBoardWriter
 
@@ -223,3 +228,79 @@ def test_tensorboard_reads_selected_data_through_assembled_links(
         accumulator.Reload()
         assert [point.value for point in accumulator.Scalars("loss")] == [0.5]
         assert accumulator.Tags()["histograms"] == (["weights"] if media else [])
+
+
+def live_run(client: MlflowClient, tmp_path: Path, name: str, host: str) -> Run:
+    """A run tagged as writing into a local directory of its own on `host`."""
+    run = named_run(client, tmp_path, name)
+    local = tmp_path / f"local-{name}"
+    local.mkdir()
+    (local / LIGHT).write_bytes(b"live scalar events")
+    client.set_tag(run.info.run_id, TB_TAG_LOCAL_HOST, host)
+    client.set_tag(run.info.run_id, TB_TAG_LOCAL_DIR, str(local))
+    return client.get_run(run.info.run_id)
+
+
+def test_run_live_on_this_host_is_linked_without_downloading(tracking, tmp_path: Path):
+    run = live_run(tracking, tmp_path, "training", socket.gethostname())
+    with (
+        patch.object(tracking, "download_artifacts") as download,
+        assemble_logdir(tracking, [run], cache_dir=tmp_path / "cache") as logdir,
+    ):
+        link = logdir / "training"
+        assert link.resolve() == (tmp_path / "local-training").resolve()
+        assert (link / LIGHT).read_bytes() == b"live scalar events"
+    download.assert_not_called()
+
+
+def test_finished_run_falls_back_to_artifacts(tracking, tmp_path: Path):
+    run = live_run(tracking, tmp_path, "training", socket.gethostname())
+    shutil.rmtree(tmp_path / "local-training")
+    with assemble_logdir(tracking, [run], cache_dir=tmp_path / "cache") as logdir:
+        link = logdir / "training"
+        assert (tmp_path / "cache") in link.resolve().parents
+        assert (link / LIGHT).read_bytes() == b"scalar events"
+
+
+def test_run_logged_on_another_host_falls_back_to_artifacts(tracking, tmp_path: Path):
+    run = live_run(tracking, tmp_path, "training", "elsewhere")
+    assert (tmp_path / "local-training").is_dir()
+    with assemble_logdir(tracking, [run], cache_dir=tmp_path / "cache") as logdir:
+        link = logdir / "training"
+        assert (tmp_path / "cache") in link.resolve().parents
+        assert (link / LIGHT).read_bytes() == b"scalar events"
+
+
+def wait_for_steps(logdir: Path, tag: str, wanted: list[int]) -> list[int]:
+    """The steps of `tag` under `logdir` once `wanted` has reached disk.
+
+    Reading is retried because the writer hands events to a worker thread, so
+    a scalar lands in the file some time after the call that wrote it returns.
+    """
+    deadline = time.monotonic() + 10.0
+    while True:
+        accumulator = EventAccumulator(str(logdir))
+        accumulator.Reload()
+        steps = (
+            [point.step for point in accumulator.Scalars(tag)]
+            if tag in accumulator.Tags()["scalars"]
+            else []
+        )
+        if steps == wanted or time.monotonic() > deadline:
+            return steps
+        time.sleep(0.05)
+
+
+def test_assembled_logdir_follows_a_run_still_being_written(tracking, tmp_path: Path):
+    with (
+        runsnap.start_run(run_name="training", capture_code=False) as active,
+        runsnap.tensorboard(sync_interval=60.0, flush_secs=0.05) as writer,
+    ):
+        writer.add_scalar("loss", 0.5, 1)
+        run = tracking.get_run(active.info.run_id)
+        with assemble_logdir(tracking, [run], cache_dir=tmp_path / "cache") as logdir:
+            link = logdir / "training"
+            assert link.resolve() == Path(writer.logdir).resolve()
+            writer.add_scalar("loss", 0.25, 2)
+            writer.flush()
+            assert wait_for_steps(link, "loss", [1, 2]) == [1, 2]

@@ -1,5 +1,6 @@
 """Run selection and foreground TensorBoard launch through the CLI."""
 
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 
 from runsnap import _cli
-from runsnap._tags import TAG_CONTINUES
+from runsnap._tags import TAG_CONTINUES, TB_TAG_LOCAL_DIR, TB_TAG_LOCAL_HOST
 
 LIGHT = "events.out.tfevents.1.host.scalars"
 MEDIA = "events.out.tfevents.1.host.media.0"
@@ -148,6 +149,25 @@ def test_chain_pulls_in_earlier_attempts(
     invoke(monkeypatch, "attempt-3", "--chain")
 
     assert set(viewer) == {"attempt-1", "attempt-2", "attempt-3"}
+
+
+def test_chain_shows_a_live_run_beside_a_cached_attempt(
+    tracking, tmp_path, cache, viewer, monkeypatch
+):
+    first = logged_run(tracking, tmp_path, "attempt-1")
+    second = logged_run(tracking, tmp_path, "attempt-2", continues=first.info.run_id)
+    local = tmp_path / "live"
+    local.mkdir()
+    (local / "events.out.tfevents.2.host.media.0").write_bytes(b"live events")
+    tracking.set_tag(second.info.run_id, TB_TAG_LOCAL_HOST, socket.gethostname())
+    tracking.set_tag(second.info.run_id, TB_TAG_LOCAL_DIR, str(local))
+
+    invoke(monkeypatch, "attempt-2", "--chain")
+
+    assert viewer == {
+        "attempt-1": {LIGHT},
+        "attempt-2": {"events.out.tfevents.2.host.media.0"},
+    }
 
 
 def test_chain_extends_a_filtered_selection(

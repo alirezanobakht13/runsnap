@@ -1,6 +1,7 @@
 """A TensorBoard summary writer that keeps scalars apart from heavy media."""
 
 import shutil
+import socket
 import tempfile
 import threading
 import warnings
@@ -17,10 +18,13 @@ from tensorboardX import SummaryWriter
 from runsnap._metrics import flatten_metrics
 from runsnap._tags import (
     TB_ARTIFACT_DIR,
+    TB_FLUSH_SECONDS,
     TB_HISTOGRAM_BINS,
     TB_LIGHT_SUFFIX,
     TB_SHARD_MAX_BYTES,
     TB_SYNC_INTERVAL_SECONDS,
+    TB_TAG_LOCAL_DIR,
+    TB_TAG_LOCAL_HOST,
     TB_TAG_LOGDIR,
     tb_media_suffix,
 )
@@ -284,15 +288,19 @@ def tensorboard(
     ended normally, by an exception, or by `KeyboardInterrupt`.
 
     `run_id` defaults to the active MLflow run. Extra keyword arguments go to
-    the underlying summary writers.
+    the underlying summary writers, which flush to disk every
+    `TB_FLUSH_SECONDS` unless the caller passes its own `flush_secs`.
     """
     resolved = run_id or _active_run_id()
     client = MlflowClient()
     logdir = tempfile.mkdtemp(prefix="runsnap-tb-")
+    kwargs.setdefault("flush_secs", TB_FLUSH_SECONDS)
     writer = TensorBoardWriter(logdir, shard_max_bytes=shard_max_bytes, **kwargs)
     sync = _Sync(client, resolved, writer, interval=sync_interval)
-    with _warn_instead_of_raising(f"tag the run with {TB_TAG_LOGDIR}"):
+    with _warn_instead_of_raising("tag the run with its TensorBoard location"):
         client.set_tag(resolved, TB_TAG_LOGDIR, TB_ARTIFACT_DIR)
+        client.set_tag(resolved, TB_TAG_LOCAL_HOST, socket.gethostname())
+        client.set_tag(resolved, TB_TAG_LOCAL_DIR, logdir)
     sync.start()
     try:
         yield writer
