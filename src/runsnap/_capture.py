@@ -5,7 +5,6 @@ import os
 import tempfile
 import warnings
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 
 from mlflow.entities import Run
@@ -58,18 +57,16 @@ class CodeState:
         return hashlib.sha256(self.patch).hexdigest()
 
 
-@lru_cache(maxsize=1)
 def resolve_repo_root() -> Path:
-    """Root of the repository the process runs in, resolved once per process.
+    """Root of the repository the process runs in.
 
     Raises `GitError` outside a repository and when `git` is unavailable.
     """
     return find_repo_root()
 
 
-@lru_cache(maxsize=1)
 def resolve_code_state() -> CodeState:
-    """The current code state, resolved once per process and reused after that.
+    """The code state of the repository as it stands right now.
 
     Raises `GitError` when the repository has no commit at `HEAD`.
     """
@@ -81,13 +78,6 @@ def resolve_code_state() -> CodeState:
         repo_url=remote_url(root),
     )
     return CodeState(git=git, patch=build_patch(root))
-
-
-def reset_code_state_cache() -> None:
-    """Forget the resolved code state so the next capture reads git again."""
-    resolve_repo_root.cache_clear()
-    resolve_code_state.cache_clear()
-    _patch_holders.clear()
 
 
 def capture_enabled() -> bool:
@@ -115,9 +105,10 @@ def max_patch_bytes() -> int:
         return DEFAULT_MAX_PATCH_BYTES
 
 
-# Run id -> id of the run holding that run's patch artifact. A nested run points
-# at its ancestor's artifact rather than uploading the same patch again.
-_patch_holders: dict[str, str] = {}
+# Run id -> (id of the run holding that run's patch artifact, patch digest). A
+# nested run whose patch matches its ancestor's points at the ancestor's
+# artifact rather than uploading the same patch again.
+_patch_holders: dict[str, tuple[str, str]] = {}
 
 
 def capture(run: Run) -> None:
@@ -170,10 +161,11 @@ def _record_state(client: MlflowClient, run: Run, state: CodeState) -> None:
 
 def _record_patch(client: MlflowClient, run: Run, state: CodeState) -> None:
     run_id = run.info.run_id
-    holder = _inherited_patch_holder(run)
+    digest = state.patch_sha256
+    holder = _inherited_patch_holder(run, digest)
     if holder is not None:
         client.set_tag(run_id, TAG_PATCH_RUN_ID, holder)
-        _patch_holders[run_id] = holder
+        _patch_holders[run_id] = (holder, digest)
         return
     ceiling = max_patch_bytes()
     if len(state.patch) > ceiling:
@@ -192,15 +184,19 @@ def _record_patch(client: MlflowClient, run: Run, state: CodeState) -> None:
         local = Path(tmp) / PATCH_ARTIFACT_NAME
         local.write_bytes(state.patch)
         client.log_artifact(run_id, str(local), artifact_path=PATCH_ARTIFACT_DIR)
-    _patch_holders[run_id] = run_id
+    _patch_holders[run_id] = (run_id, digest)
 
 
-def _inherited_patch_holder(run: Run) -> str | None:
-    """The ancestor run already holding this run's patch, when there is one."""
+def _inherited_patch_holder(run: Run, digest: str) -> str | None:
+    """The ancestor run already holding the patch with `digest`, when there is one."""
     parent_id = run.data.tags.get(MLFLOW_PARENT_RUN_ID)
     if parent_id is None:
         return None
-    return _patch_holders.get(parent_id)
+    recorded = _patch_holders.get(parent_id)
+    if recorded is None:
+        return None
+    holder, recorded_digest = recorded
+    return holder if recorded_digest == digest else None
 
 
 def _mirror_mlflow_tags(client: MlflowClient, run: Run, state: CodeState) -> None:

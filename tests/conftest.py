@@ -80,8 +80,6 @@ def tracking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A local sqlite-backed MLflow tracking store, isolated per test."""
     import mlflow
 
-    from runsnap._capture import reset_code_state_cache
-
     uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -92,11 +90,9 @@ def tracking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "runsnap-tests", artifact_location=artifacts.as_uri()
     )
     mlflow.set_experiment(experiment_id=experiment_id)
-    reset_code_state_cache()
     yield client
     while mlflow.active_run() is not None:
         mlflow.end_run()
-    reset_code_state_cache()
 
 
 @pytest.fixture

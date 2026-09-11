@@ -42,25 +42,6 @@ def artifact_paths(client: mlflow.MlflowClient, run_id: str) -> set[str]:
     return found
 
 
-def test_git_is_read_once_across_runs(in_repo: GitRepo, tracking, monkeypatch):
-    in_repo.write("main.py", "print('changed')\n")
-    calls: list[tuple[str, ...]] = []
-    real = _git._git
-
-    def counting(args, cwd, **kwargs):
-        calls.append(tuple(args))
-        return real(args, cwd, **kwargs)
-
-    monkeypatch.setattr(_git, "_git", counting)
-
-    for _ in range(3):
-        with runsnap.start_run():
-            pass
-
-    assert calls.count(("diff", "--no-ext-diff", "--binary", "HEAD")) == 1
-    assert calls.count(("rev-parse", "--show-toplevel")) == 1
-
-
 def test_dirty_run_records_tags_and_patch(in_repo: GitRepo, tracking):
     in_repo.git("remote", "add", "origin", "https://user:token@example.com/o/r.git")
     base = in_repo.git("rev-parse", "HEAD").strip()
@@ -105,14 +86,37 @@ def test_identical_trees_share_a_digest(in_repo: GitRepo, tracking):
         == (tags(tracking, second_id)[TAG_PATCH_SHA256])
     )
 
+
+def test_edit_between_runs_records_a_new_patch(in_repo: GitRepo, tracking):
+    in_repo.write("main.py", "print('changed')\n")
+    with runsnap.start_run() as first:
+        first_id = first.info.run_id
     in_repo.write("main.py", "print('changed again')\n")
-    _capture.reset_code_state_cache()
-    with runsnap.start_run() as third:
-        third_id = third.info.run_id
+    with runsnap.start_run() as second:
+        second_id = second.info.run_id
+
     assert (
-        tags(tracking, third_id)[TAG_PATCH_SHA256]
-        != (tags(tracking, first_id)[TAG_PATCH_SHA256])
+        tags(tracking, first_id)[TAG_PATCH_SHA256]
+        != (tags(tracking, second_id)[TAG_PATCH_SHA256])
     )
+    local = tracking.download_artifacts(second_id, PATCH_ARTIFACT_PATH)
+    assert b"print('changed again')" in Path(local).read_bytes()
+
+
+def test_commit_between_runs_records_the_new_commit(in_repo: GitRepo, tracking):
+    in_repo.write("main.py", "print('changed')\n")
+    with runsnap.start_run() as first:
+        first_id = first.info.run_id
+    committed = in_repo.commit("between runs")
+    with runsnap.start_run() as second:
+        second_id = second.info.run_id
+
+    assert tags(tracking, first_id)[TAG_COMMIT] != committed
+    recorded = tags(tracking, second_id)
+    assert recorded[TAG_COMMIT] == committed
+    assert recorded[TAG_DIRTY] == "false"
+    assert TAG_PATCH_SHA256 not in recorded
+    assert artifact_paths(tracking, second_id) == set()
 
 
 def test_nested_runs_point_at_the_parents_patch(in_repo: GitRepo, tracking):
@@ -132,6 +136,24 @@ def test_nested_runs_point_at_the_parents_patch(in_repo: GitRepo, tracking):
         assert recorded[TAG_PATCH_SHA256] == tags(tracking, parent_id)[TAG_PATCH_SHA256]
         assert recorded[TAG_PATCH_RUN_ID] == parent_id
         assert artifact_paths(tracking, child_id) == set()
+
+
+def test_nested_run_with_a_changed_tree_uploads_its_own_patch(
+    in_repo: GitRepo, tracking
+):
+    in_repo.write("main.py", "print('changed')\n")
+    with runsnap.start_run() as parent:
+        parent_id = parent.info.run_id
+        in_repo.write("main.py", "print('changed again')\n")
+        with runsnap.start_run(nested=True) as child:
+            child_id = child.info.run_id
+
+    recorded = tags(tracking, child_id)
+    assert recorded[TAG_PATCH_SHA256] != tags(tracking, parent_id)[TAG_PATCH_SHA256]
+    assert TAG_PATCH_RUN_ID not in recorded
+    assert artifact_paths(tracking, child_id) == {PATCH_ARTIFACT_PATH}
+    local = tracking.download_artifacts(child_id, PATCH_ARTIFACT_PATH)
+    assert b"print('changed again')" in Path(local).read_bytes()
 
 
 def test_oversized_patch_is_skipped(in_repo: GitRepo, tracking, monkeypatch):

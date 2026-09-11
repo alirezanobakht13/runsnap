@@ -1,13 +1,13 @@
 ## 1. Code-state freshness
 
-- [ ] 1.1 Remove the `lru_cache` from `resolve_code_state()` and
+- [x] 1.1 Remove the `lru_cache` from `resolve_code_state()` and
   `resolve_repo_root()` in `_capture.py`, and delete `reset_code_state_cache()`
   and its `tests/conftest.py` teardown; verify the suite still passes
-- [ ] 1.2 Rewrite `_patch_holders` to map a run id to `(holder_run_id, digest)`
+- [x] 1.2 Rewrite `_patch_holders` to map a run id to `(holder_run_id, digest)`
   and make `_inherited_patch_holder()` inherit only on a digest match; verify a
   nested run whose tree changed after its parent started uploads its own patch
   and carries its own digest
-- [ ] 1.3 Add a test that a process starting two runs across an edit records two
+- [x] 1.3 Add a test that a process starting two runs across an edit records two
   different patches, and one that it records a new commit made between them
 
 ## 2. Patch file listing
