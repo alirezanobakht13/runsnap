@@ -36,15 +36,15 @@
 
 ## 4. TensorBoard writer and viewer
 
-- [ ] 4.1 Replace `_event_path()`'s private-attribute walk with a glob of the
+- [x] 4.1 Replace `_event_path()`'s private-attribute walk with a glob of the
   writer's `get_logdir()` for `events.out.tfevents.*<filename_suffix>`; verify
   `light_path` and `media_path` still resolve and shard rolling still works
-- [ ] 4.2 Add `tensorboardx<3` to `pyproject.toml` via `uv add` and verify
+- [x] 4.2 Add `tensorboardx<3` to `pyproject.toml` via `uv add` and verify
   `uv sync` resolves
-- [ ] 4.3 Rewrite `assemble_logdir()` name assignment as two passes per
+- [x] 4.3 Rewrite `assemble_logdir()` name assignment as two passes per
   design.md; verify a test with two runs named `base` plus one named
   `base-<that run's short id>` produces three distinct names without raising
-- [ ] 4.4 Make `fetch_run()` replace a cache entry that is not already a symlink
+- [x] 4.4 Make `fetch_run()` replace a cache entry that is not already a symlink
   to the intended target; verify tests cover a stale symlink and a regular file
   occupying the link path
 

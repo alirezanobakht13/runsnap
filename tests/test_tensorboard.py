@@ -214,6 +214,39 @@ def test_shards_sealed_in_the_same_second_do_not_collide(logdir: Path):
     assert len({p.name for p in shards}) == len(shards)
 
 
+def test_paths_name_the_light_file_and_the_open_shard(logdir: Path):
+    writer = TensorBoardWriter(logdir, shard_max_bytes=1)
+    writer.add_scalar("train/loss", 0.5, 1)
+    writer.add_image("train/sample", image(16), 1)
+    writer.flush()
+    sealed = writer.media_path
+    # The flushed shard is over the limit, so this write rolls into a new one.
+    writer.add_image("train/sample", image(16), 2)
+    open_shard = writer.media_path
+    light = writer.light_path
+    writer.close()
+
+    assert light.parent == logdir
+    assert light.name.endswith(TB_LIGHT_SUFFIX)
+    assert open_shard != sealed
+    assert {sealed, open_shard} <= set(media_files(logdir))
+
+
+def test_unlocatable_shard_warns_and_writing_continues(logdir: Path):
+    writer = TensorBoardWriter(logdir)
+    decoy = logdir / "events.out.tfevents.0.decoy.media.0"
+    decoy.touch()
+    with pytest.warns(UserWarning, match="roll the media shard"):
+        writer.add_image("train/sample", image(16), 1)
+    writer.add_scalar("train/loss", 0.5, 1)
+    writer.close()
+
+    assert read_light(logdir).Tags()["scalars"] == ["train/loss"]
+    shards = [p for p in media_files(logdir) if p != decoy]
+    assert len(shards) == 1
+    assert accumulate_tags(shards[0])["images"] == ["train/sample"]
+
+
 def test_interleaved_writing_reads_back_as_one_complete_run(logdir: Path):
     writer = TensorBoardWriter(logdir, shard_max_bytes=16 * 1024)
     for step in range(60):

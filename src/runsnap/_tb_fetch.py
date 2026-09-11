@@ -6,6 +6,7 @@ import socket
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from itertools import count
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
@@ -56,7 +57,8 @@ def fetch_run(
         if is_light:
             link = light_dir.joinpath(*relative.parts)
             link.parent.mkdir(parents=True, exist_ok=True)
-            if not link.is_symlink():
+            if not (link.is_symlink() and link.readlink() == target):
+                link.unlink(missing_ok=True)
                 link.symlink_to(target)
     return logdir if media else light_dir
 
@@ -101,20 +103,24 @@ def assemble_logdir(
         if any(path.rglob("events.out.tfevents.*"))
     }
     counts = Counter(names.values())
-    reserved = set(names.values())
+    links = {name: run_id for run_id, name in names.items() if counts[name] == 1}
+    for run_id, name in names.items():
+        if counts[name] > 1:
+            distinct = _distinct_names(name, run_id)
+            links[next(n for n in distinct if n not in links)] = run_id
     with TemporaryDirectory(prefix="runsnap-tb-") as tmp:
         logdir = Path(tmp)
-        for run_id, name in names.items():
-            if counts[name] > 1:
-                base = name
-                name = f"{base}-{run_id[:8]}"
-                counter = 0
-                while name in reserved:
-                    counter += 1
-                    name = f"{base}-{run_id}-{counter}"
-                reserved.add(name)
+        for name, run_id in links.items():
             (logdir / name).symlink_to(paths[run_id], target_is_directory=True)
         yield logdir
+
+
+def _distinct_names(base: str, run_id: str) -> Iterator[str]:
+    """Names for a run whose own name another selected run shares, shortest first."""
+    yield f"{base}-{run_id[:8]}"
+    yield f"{base}-{run_id}"
+    for counter in count(1):
+        yield f"{base}-{run_id}-{counter}"
 
 
 def _live_logdir(run: Run) -> Path | None:

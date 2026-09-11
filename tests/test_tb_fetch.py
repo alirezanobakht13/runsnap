@@ -115,6 +115,31 @@ def test_interrupted_download_preserves_previous_file(tracking, tmp_path: Path):
     assert (logdir / LIGHT).read_bytes() == source.read_bytes()
 
 
+def test_stale_link_is_repointed_at_the_cached_file(tracking, tmp_path: Path):
+    run = logged_run(tracking, tmp_path)
+    cache = tmp_path / "cache"
+    link = fetch_run(tracking, run.info.run_id, cache_dir=cache) / LIGHT
+    target = link.readlink()
+    link.unlink()
+    link.symlink_to(tmp_path / "moved" / LIGHT)
+    fetch_run(tracking, run.info.run_id, cache_dir=cache)
+    assert link.readlink() == target
+    assert link.read_bytes() == b"scalar events"
+
+
+def test_regular_file_in_the_link_path_is_replaced(tracking, tmp_path: Path):
+    run = logged_run(tracking, tmp_path)
+    cache = tmp_path / "cache"
+    link = fetch_run(tracking, run.info.run_id, cache_dir=cache) / LIGHT
+    target = link.readlink()
+    link.unlink()
+    link.write_bytes(b"not a link")
+    fetch_run(tracking, run.info.run_id, cache_dir=cache)
+    assert link.is_symlink()
+    assert link.readlink() == target
+    assert link.read_bytes() == b"scalar events"
+
+
 def test_default_cache_respects_xdg_cache_home(tracking, tmp_path, monkeypatch):
     run = logged_run(tracking, tmp_path)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
@@ -164,7 +189,11 @@ def test_assembly_handles_names_that_collide_with_generated_suffixes(
     with assemble_logdir(
         tracking, [first, second, third], cache_dir=tmp_path / "cache"
     ) as logdir:
-        assert len(list(logdir.iterdir())) == 3
+        assert {p.name for p in logdir.iterdir()} == {
+            f"baseline-{first.info.run_id}",
+            f"baseline-{second.info.run_id[:8]}",
+            literal_name,
+        }
         assert third.info.run_id in (logdir / literal_name).resolve().parts
 
 

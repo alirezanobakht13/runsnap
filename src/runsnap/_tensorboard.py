@@ -67,13 +67,13 @@ class TensorBoardWriter:
     def light_path(self) -> Path:
         """The event file holding scalars and text."""
         with self._lock:
-            return _event_path(self._light)
+            return _event_path(self._light, TB_LIGHT_SUFFIX)
 
     @property
     def media_path(self) -> Path:
         """The media shard currently open for writing."""
         with self._lock:
-            return _event_path(self._media)
+            return _event_path(self._media, tb_media_suffix(self._shard))
 
     def add_record(
         self,
@@ -153,7 +153,7 @@ class TensorBoardWriter:
 
     def _roll_if_full(self) -> None:
         with _warn_instead_of_raising("roll the media shard"):
-            path = _event_path(self._media)
+            path = _event_path(self._media, tb_media_suffix(self._shard))
             if not path.exists() or path.stat().st_size <= self._shard_max_bytes:
                 return
             self._media.close()
@@ -174,16 +174,20 @@ class TensorBoardWriter:
         )
 
 
-def _event_path(writer: SummaryWriter) -> Path:
+def _event_path(writer: SummaryWriter, suffix: str) -> Path:
     """The file on disk that `writer` is appending events to.
 
     The underlying writer settles on the name in its own constructor and offers
-    no accessor for it, so the name is read off the writer it belongs to.
+    no accessor for it, but the name ends in `suffix`, the `filename_suffix`
+    the writer was constructed with, which no other writer over the directory
+    shares.
     """
-    event_writer = getattr(writer.file_writer, "event_writer", None)
-    if event_writer is None:
-        raise RuntimeError("the summary writer has no open event file")
-    return Path(event_writer._ev_writer._file_name)
+    paths = list(Path(writer.logdir).glob(f"{EVENT_GLOB}{suffix}"))
+    if len(paths) != 1:
+        raise RuntimeError(
+            f"expected one event file ending in {suffix!r}, found {len(paths)}"
+        )
+    return paths[0]
 
 
 @contextmanager
