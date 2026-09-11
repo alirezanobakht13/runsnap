@@ -127,6 +127,18 @@ def test_show_prints_the_recorded_code_state(
     assert in_repo.status() == before
 
 
+def test_show_lists_a_binary_file_added_to_the_tree(
+    in_repo: GitRepo, tracking, capsys
+) -> None:
+    in_repo.write("weights.bin", b"\x00\x01\x02\xff")
+    with runsnap.start_run() as active:
+        run_id = active.info.run_id
+
+    show(run_id)
+
+    assert "  weights.bin" in capsys.readouterr().out
+
+
 def test_show_on_a_clean_run_reports_no_patch(
     in_repo: GitRepo, tracking, capsys
 ) -> None:

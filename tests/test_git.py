@@ -15,8 +15,10 @@ from runsnap._git import (
     current_branch,
     find_repo_root,
     head_commit,
+    patch_files,
     read_state,
     remote_url,
+    unquote_path,
 )
 
 
@@ -138,6 +140,150 @@ def test_clean_tree_produces_an_empty_patch(repo: GitRepo) -> None:
     repo.commit("base")
 
     assert build_patch(repo.path) == b""
+
+
+@pytest.mark.parametrize(
+    ("token", "path"),
+    [
+        pytest.param(b'"caf\\303\\251.txt"', "caf\u00e9.txt", id="non-ascii"),
+        pytest.param(b'"say \\"hi\\".txt"', 'say "hi".txt', id="double-quote"),
+        pytest.param(b'"back\\\\slash\\tt.txt"', "back\\slash\tt.txt", id="escapes"),
+        pytest.param(b'"raw\\377.txt"', "raw\udcff.txt", id="invalid-utf8"),
+        pytest.param(b"plain.txt", "plain.txt", id="bare"),
+    ],
+)
+def test_unquote_path_reads_git_quoting(token: bytes, path: str) -> None:
+    assert unquote_path(token) == path
+
+
+@pytest.mark.parametrize(
+    ("record", "path"),
+    [
+        pytest.param(
+            rb"""diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"
+index 5626abf..814f4a4 100644
+--- "a/caf\303\251.txt"
++++ "b/caf\303\251.txt"
+@@ -1 +1,2 @@
+ one
++two
+""",
+            "café.txt",
+            id="non-ascii",
+        ),
+        pytest.param(
+            rb"""diff --git "a/say \"hi\".txt" "b/say \"hi\".txt"
+new file mode 100644
+index 0000000..5626abf
+--- /dev/null
++++ "b/say \"hi\".txt"
+@@ -0,0 +1 @@
++q
+""",
+            'say "hi".txt',
+            id="double-quote",
+        ),
+        pytest.param(
+            rb"""diff --git a/dir b/x.txt b/dir b/x.txt
+new file mode 100644
+index 0000000..5626abf
+--- /dev/null
++++ b/dir b/x.txt
+@@ -0,0 +1 @@
++sep
+""",
+            "dir b/x.txt",
+            id="separator-in-path",
+        ),
+        pytest.param(
+            rb"""diff --git a/old.txt b/new.txt
+similarity index 100%
+rename from old.txt
+rename to new.txt
+""",
+            "new.txt",
+            id="rename",
+        ),
+        pytest.param(
+            rb"""diff --git a/plain.txt "b/caf\303\251.txt"
+similarity index 100%
+rename from plain.txt
+rename to "caf\303\251.txt"
+""",
+            "café.txt",
+            id="rename-to-quoted",
+        ),
+        pytest.param(
+            rb"""diff --git "a/caf\303\251.txt" b/plain b/name.txt
+similarity index 100%
+rename from "caf\303\251.txt"
+rename to plain b/name.txt
+""",
+            "plain b/name.txt",
+            id="rename-from-quoted",
+        ),
+        pytest.param(
+            rb"""diff --git a/gone.txt b/gone.txt
+deleted file mode 100644
+index 5626abf..0000000
+--- a/gone.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-gone soon
+""",
+            "gone.txt",
+            id="deletion",
+        ),
+        pytest.param(
+            rb"""diff --git a/bin.dat b/bin.dat
+new file mode 100644
+index 0000000..d98e7c5
+GIT binary patch
+literal 4
+LcmZQzWMT#Y01f~L
+
+literal 0
+HcmV?d00001
+
+""",
+            "bin.dat",
+            id="binary-add",
+        ),
+    ],
+)
+def test_patch_files_reads_each_kind_of_header(record: bytes, path: str) -> None:
+    assert patch_files(record) == [path]
+
+
+def test_patch_files_keeps_patch_order_across_records() -> None:
+    patch = b"".join(
+        [
+            b"diff --git a/z.txt b/z.txt\n--- a/z.txt\n+++ b/z.txt\n@@ -1 +1 @@\n-1\n+2\n",
+            b"diff --git a/old.txt b/new.txt\nrename from old.txt\nrename to new.txt\n",
+            b"diff --git a/a.txt b/a.txt\n--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1 @@\n+x\n",
+        ]
+    )
+
+    assert patch_files(patch) == ["z.txt", "new.txt", "a.txt"]
+
+
+def test_patch_files_lists_every_path_git_names(repo: GitRepo) -> None:
+    repo.write("café.txt", "one\n")
+    repo.write("old.txt", "kept\n")
+    repo.write("gone.txt", "gone soon\n")
+    repo.commit("base")
+    repo.write("café.txt", "one\ntwo\n")
+    repo.write('say "hi".txt', "q\n")
+    repo.write("dir b/x.txt", "sep\n")
+    (repo.path / "old.txt").rename(repo.path / "new.txt")
+    (repo.path / "gone.txt").unlink()
+    repo.write("bin.dat", b"\x00\x01\x02\xff")
+
+    files = patch_files(build_patch(repo.path))
+
+    assert sorted(files) == sorted(
+        ["café.txt", 'say "hi".txt', "dir b/x.txt", "new.txt", "gone.txt", "bin.dat"]
+    )
 
 
 def test_worktree_reconstructs_the_recorded_state(

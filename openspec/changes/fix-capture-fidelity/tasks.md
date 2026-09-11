@@ -12,14 +12,14 @@
 
 ## 2. Patch file listing
 
-- [ ] 2.1 Add a C-unquoting helper in `_git.py` covering `\n \t \r \" \\` and
+- [x] 2.1 Add a C-unquoting helper in `_git.py` covering `\n \t \r \" \\` and
   octal escapes, decoding with `surrogateescape`; verify unit tests round-trip a
   non-ASCII name and a name holding a double quote
-- [ ] 2.2 Rewrite `patch_files()` to parse each record's `diff --git` header by
+- [x] 2.2 Rewrite `patch_files()` to parse each record's `diff --git` header by
   the three rules in design.md (quoted pair, matching ` b/` split, `rename to`
   fallback); verify tests cover a non-ASCII name, an embedded quote, a path
   containing ` b/`, a rename, a deletion, and a binary add
-- [ ] 2.3 Verify `runsnap show` lists a binary file added to the working tree,
+- [x] 2.3 Verify `runsnap show` lists a binary file added to the working tree,
   which the current implementation already handles, has not regressed
 
 ## 3. Metric leaves

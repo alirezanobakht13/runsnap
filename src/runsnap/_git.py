@@ -1,6 +1,7 @@
 """Git primitives: reading repository state, building and applying patches."""
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -148,15 +149,60 @@ def build_patch(root: Path | str) -> bytes:
         return _git(["diff", "--no-ext-diff", "--binary", "HEAD"], root, env=env)
 
 
+_ESCAPES = {b"n": b"\n", b"t": b"\t", b"r": b"\r", b'"': b'"', b"\\": b"\\"}
+_ESCAPE = re.compile(rb'\\([0-3][0-7]{2}|[ntr"\\])')
+
+
+def _unescape(match: re.Match[bytes]) -> bytes:
+    escape = match.group(1)
+    return bytes([int(escape, 8)]) if len(escape) == 3 else _ESCAPES[escape]
+
+
+def unquote_path(token: bytes) -> str:
+    r"""A path as git prints it, C-quoted or bare, as the `str` the filesystem uses.
+
+    Git quotes a path holding non-ASCII bytes, double quotes, backslashes, or
+    control characters, escaping them as `\n \t \r \" \\` and three-digit
+    octal `\NNN`. Bytes that are not valid UTF-8 survive as surrogate escapes.
+    """
+    if token.startswith(b'"'):
+        token = _ESCAPE.sub(_unescape, token[1:-1])
+    return token.decode(errors="surrogateescape")
+
+
+_QUOTED_A_SIDE = re.compile(rb'"(?:[^"\\]|\\.)*" (.*)')
+
+
+def _header_path(header: bytes) -> str | None:
+    """Path Q of a `diff --git a/P b/Q` header, or `None` when only `rename to` has it.
+
+    Git quotes each side on its own: a quoted `a/` side delimits itself, and
+    the `b/` side is whatever follows. Two bare sides are told apart at the
+    ` b/` whose halves match, which finds Q even when it holds ` b/` itself.
+    Without such a split P and Q differ, and the record's `rename to` line
+    names Q.
+    """
+    if quoted := _QUOTED_A_SIDE.match(header):
+        return unquote_path(quoted.group(1)).removeprefix("b/")
+    for split in re.finditer(rb" b/", header):
+        if header[2 : split.start()] == header[split.end() :]:
+            return unquote_path(header[split.end() :])
+    return None
+
+
 def patch_files(patch: bytes) -> list[str]:
     """Paths a patch touches, in the order the patch names them."""
     files: list[str] = []
-    for line in patch.decode(errors="replace").splitlines():
-        if not line.startswith("diff --git "):
-            continue
-        _, marker, path = line.rpartition(" b/")
-        if marker:
-            files.append(path.removesuffix('"'))
+    renamed = False
+    for line in patch.split(b"\n"):
+        if line.startswith(b"diff --git "):
+            path = _header_path(line.removeprefix(b"diff --git "))
+            renamed = path is None
+            if path is not None:
+                files.append(path)
+        elif renamed and line.startswith(b"rename to "):
+            files.append(unquote_path(line.removeprefix(b"rename to ")))
+            renamed = False
     return files
 
 
