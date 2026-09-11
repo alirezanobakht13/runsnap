@@ -64,6 +64,17 @@ def test_one_element_array_becomes_its_element():
     assert flatten_metrics({"reward": np.array([0.25])}) == {"reward": 0.25}
 
 
+def test_one_element_sequence_becomes_its_element():
+    assert flatten_metrics({"reward": [0.25], "steps": (7,)}) == {
+        "reward": 0.25,
+        "steps": 7,
+    }
+
+
+def test_empty_sequence_is_omitted():
+    assert flatten_metrics({"rewards": [], "loss": 0.5}) == {"loss": 0.5}
+
+
 def test_boolean_becomes_an_int():
     flat = flatten_metrics({"converged": True})
     assert flat == {"converged": 1}
@@ -81,8 +92,22 @@ def test_multi_element_array_raises_naming_the_key():
         flatten_metrics({"grads": np.array([1.0, 2.0, 3.0])})
 
 
+def test_multi_element_tensor_raises_naming_the_key():
+    class Tensor:
+        def item(self):
+            raise RuntimeError("a Tensor with 3 elements cannot be converted to Scalar")
+
+    with pytest.raises(ValueError, match="grads"):
+        flatten_metrics({"grads": Tensor()})
+
+
+def test_list_of_numbers_raises_naming_the_key():
+    with pytest.raises(ValueError, match="grads"):
+        flatten_metrics({"grads": [1.0, 2.0, 3.0]})
+
+
 def test_drops_non_numeric_leaves():
-    record = {"kind": "train", "successes": None, "loss": 0.5}
+    record = {"kind": "train", "raw": b"train", "successes": None, "loss": 0.5}
     assert flatten_metrics(record) == {"loss": 0.5}
 
 

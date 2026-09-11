@@ -24,14 +24,14 @@
 
 ## 3. Metric leaves
 
-- [ ] 3.1 Rewrite `_leaf()` in `_metrics.py` so a multi-element leaf raises
+- [x] 3.1 Rewrite `_leaf()` in `_metrics.py` so a multi-element leaf raises
   `ValueError` naming the key whether it fails with `ValueError`, `RuntimeError`
   or `TypeError`, and so a non-string sequence of more than one number raises
   the same way; verify tests cover a numpy array, a stub object raising
   `RuntimeError` from `.item()`, and a plain list
-- [ ] 3.2 Verify a one-element sequence yields its element, an empty sequence is
+- [x] 3.2 Verify a one-element sequence yields its element, an empty sequence is
   omitted, and `str`/`bytes`/`None` leaves stay omitted
-- [ ] 3.3 Update the `flatten_metrics()` docstring and the README's
+- [x] 3.3 Update the `flatten_metrics()` docstring and the README's
   `add_record` paragraph to state the sequence rule
 
 ## 4. TensorBoard writer and viewer

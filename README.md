@@ -82,8 +82,10 @@ Pydantic model — as one scalar per leaf, so the call above draws `eval/score`
 and `eval/solved`, and a nested `actor` field would draw `eval/actor.entropy`.
 `runsnap.flatten_metrics(record)` returns that same `{key: number}` mapping for
 `mlflow.log_metrics`. Booleans become `0` / `1`, `None` and strings are dropped,
-and `NaN` and infinities are kept so a divergence shows as a gap in the curve; a
-field holding more than one number raises, naming the field.
+and `NaN` and infinities are kept so a divergence shows as a gap in the curve. A
+one-element array, list, or tuple charts as its element and an empty one is
+dropped; a field holding more than one number, whether an array or a list,
+raises, naming the field.
 
 Use the same `MLFLOW_TRACKING_URI` for logging and viewing (or pass
 `--tracking-uri` to the CLI):
