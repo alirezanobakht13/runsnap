@@ -50,11 +50,11 @@
 
 ## 5. Narrower corrections
 
-- [ ] 5.1 In `_cli.py` `_reconstruct()`, capture the pre-run position as
+- [x] 5.1 In `_cli.py` `_reconstruct()`, capture the pre-run position as
   `current_branch(root) or head_commit(root)` and roll back to it; verify a test
   that a failed `--no-worktree` patch from a detached `HEAD` returns to the
   original commit and removes the created branch
-- [ ] 5.2 Make `record_continues()` warn instead of raising when the tracking
+- [x] 5.2 Make `record_continues()` warn instead of raising when the tracking
   store refuses the tag, mirroring `record_cause()`; verify a test with a client
   that raises on `set_tag`
 

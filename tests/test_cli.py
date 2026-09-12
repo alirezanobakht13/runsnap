@@ -416,6 +416,28 @@ def test_in_place_failure_restores_the_previous_branch(
     assert in_repo.git("branch", "--list", "rebuilt").strip() == ""
 
 
+def test_in_place_failure_restores_a_detached_head(
+    in_repo: GitRepo, tracking, monkeypatch
+) -> None:
+    in_repo.write("main.py", "print('changed')\n")
+    with runsnap.start_run() as active:
+        run_id = active.info.run_id
+    detached_at = in_repo.commit("keep the working tree clean")
+    in_repo.git("checkout", "--quiet", "--detach")
+
+    def refuse(tree, patch):
+        raise _git.GitError("git apply failed: patch does not apply")
+
+    monkeypatch.setattr(_cli, "apply_patch", refuse)
+
+    with pytest.raises(CliError, match="does not apply"):
+        checkout(run_id, worktree=False, branch="rebuilt")
+
+    assert in_repo.git("rev-parse", "HEAD").strip() == detached_at
+    assert in_repo.git("rev-parse", "--abbrev-ref", "HEAD").strip() == "HEAD"
+    assert in_repo.git("branch", "--list", "rebuilt").strip() == ""
+
+
 def test_main_reports_a_failure_without_a_traceback(
     in_repo: GitRepo, tracking, capsys, monkeypatch
 ) -> None:

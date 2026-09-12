@@ -23,6 +23,7 @@ from runsnap._git import (
     current_branch,
     delete_branch,
     find_repo_root,
+    head_commit,
     is_dirty,
     patch_files,
     remove_worktree,
@@ -395,7 +396,7 @@ def _reconstruct(
     force: bool,
 ) -> Path:
     """Create the branch, apply the patch, and undo both if the patch fails."""
-    previous = current_branch(root)
+    previous = current_branch(root) or head_commit(root)
     if worktree:
         tree = add_worktree(root, target_path, target_branch, base)
     else:
@@ -407,7 +408,7 @@ def _reconstruct(
         if worktree:
             remove_worktree(root, tree)
         else:
-            checkout_existing(root, previous or base)
+            checkout_existing(root, previous)
         delete_branch(root, target_branch)
         raise CliError(f"the recorded patch does not apply to {base}: {exc}") from exc
     return tree

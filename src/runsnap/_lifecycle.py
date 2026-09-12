@@ -52,8 +52,18 @@ def record_cause(run_id: str, exc: BaseException) -> None:
 
 
 def record_continues(run_id: str, continues: str) -> None:
-    """Tag `run_id` with the id of the attempt it continues."""
-    MlflowClient().set_tag(run_id, TAG_CONTINUES, continues)
+    """Tag `run_id` with the id of the attempt it continues.
+
+    A tracking store that refuses the tag is reported as a warning: the run
+    has already started and the caller's training loop must go on.
+    """
+    try:
+        MlflowClient().set_tag(run_id, TAG_CONTINUES, continues)
+    except Exception as tag_error:  # noqa: BLE001 - never raise into the run
+        warnings.warn(
+            f"runsnap could not record the continued attempt: {tag_error}",
+            stacklevel=3,
+        )
 
 
 def attempt_chain(run_id: str, client: MlflowClient | None = None) -> list[str]:

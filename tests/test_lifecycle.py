@@ -79,6 +79,24 @@ def test_continues_records_the_earlier_attempt(tracking):
     assert tracking.get_run(second_id).data.tags[TAG_CONTINUES] == first_id
 
 
+def test_refused_continues_tag_warns_and_still_starts_the_run(tracking, monkeypatch):
+    class Refusing:
+        def set_tag(self, *args, **kwargs):
+            raise RuntimeError("tag refused")
+
+    monkeypatch.setattr(_lifecycle, "MlflowClient", Refusing)
+
+    with (
+        pytest.warns(UserWarning, match="tag refused"),
+        runsnap.start_run(capture_code=False, continues="0" * 32) as run,
+    ):
+        run_id = run.info.run_id
+
+    status, recorded = status_and_tags(tracking, run_id)
+    assert status == "FINISHED"
+    assert TAG_CONTINUES not in recorded
+
+
 def test_fresh_attempt_records_no_predecessor(tracking):
     with runsnap.start_run(capture_code=False) as run:
         run_id = run.info.run_id
