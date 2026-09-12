@@ -72,7 +72,7 @@
 
 ## 7. Final pass
 
-- [ ] 7.1 Run `uv run pytest`, `uv run ruff check`, `uv run ruff format`, and
+- [x] 7.1 Run `uv run pytest`, `uv run ruff check`, `uv run ruff format`, and
   `uv run ty check`; verify all pass
-- [ ] 7.2 Run `openspec validate --changes fix-capture-fidelity --strict` and
+- [x] 7.2 Run `openspec validate --changes fix-capture-fidelity --strict` and
   verify it reports no errors
