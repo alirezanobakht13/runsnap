@@ -170,3 +170,16 @@ When `runsnap.tensorboard()` creates the local log directory it writes into, the
 
 - **WHEN** a user enters `runsnap.tensorboard(flush_secs=60)`
 - **THEN** the underlying writers use a 60 second flush interval
+
+### Requirement: Writing TensorBoard data never fails the run that produced it
+
+A failure anywhere in TensorBoard logging — writing an event, locating the file
+an event was written to, rolling a shard, or uploading — SHALL be reported as a
+warning and SHALL NOT raise into the training loop.
+
+#### Scenario: The underlying writer's event file cannot be located
+
+- **WHEN** the summary writer does not expose the file it is appending events to
+  in the expected form
+- **THEN** a warning is issued, the training loop continues, and events already
+  written remain uploadable
