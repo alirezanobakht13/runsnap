@@ -60,14 +60,14 @@
 
 ## 6. Simplifications
 
-- [ ] 6.1 Have `resolve_code_state()` call `_git.read_state()` instead of
+- [x] 6.1 Have `resolve_code_state()` call `_git.read_state()` instead of
   re-inlining it, and collapse `capture()`'s two `try` blocks into one that
   keeps both warning messages distinguishable; verify existing capture tests pass
-- [ ] 6.2 Remove the `if not prefix and not data` special case from
+- [x] 6.2 Remove the `if not prefix and not data` special case from
   `flatten_model()` and settle empty-model behavior one way in the docstring;
   verify the params tests cover an empty model both with and without a prefix
-- [ ] 6.3 Annotate `start_run()` as `-> LifecycleRun` and verify `ty check` passes
-- [ ] 6.4 Add `mlruns/`, `.pytest_cache/`, and `.ruff_cache/` to `.gitignore` and
+- [x] 6.3 Annotate `start_run()` as `-> LifecycleRun` and verify `ty check` passes
+- [x] 6.4 Add `mlruns/`, `.pytest_cache/`, and `.ruff_cache/` to `.gitignore` and
   verify `git status --porcelain` is clean after a test run
 
 ## 7. Final pass

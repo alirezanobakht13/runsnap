@@ -2,6 +2,7 @@
 
 import warnings
 from types import TracebackType
+from typing import Literal
 
 import mlflow
 from mlflow.tracking import MlflowClient
@@ -24,7 +25,7 @@ class LifecycleRun(mlflow.ActiveRun):
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
-    ) -> bool:
+    ) -> Literal[False]:
         if exc_val is not None:
             record_cause(self.info.run_id, exc_val)
         if isinstance(exc_val, KeyboardInterrupt) and _is_active(self.info.run_id):

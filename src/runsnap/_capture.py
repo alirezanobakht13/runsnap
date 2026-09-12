@@ -10,15 +10,7 @@ from pathlib import Path
 from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 
-from runsnap._git import (
-    GitError,
-    GitState,
-    build_patch,
-    current_branch,
-    find_repo_root,
-    head_commit,
-    remote_url,
-)
+from runsnap._git import GitError, GitState, build_patch, find_repo_root, read_state
 from runsnap._tags import (
     DEFAULT_MAX_PATCH_BYTES,
     ENV_CAPTURE_CODE,
@@ -68,16 +60,10 @@ def resolve_repo_root() -> Path:
 def resolve_code_state() -> CodeState:
     """The code state of the repository as it stands right now.
 
-    Raises `GitError` when the repository has no commit at `HEAD`.
+    Raises `GitError` outside a repository and when it has no commit at `HEAD`.
     """
-    root = resolve_repo_root()
-    git = GitState(
-        root=root,
-        commit=head_commit(root),
-        branch=current_branch(root),
-        repo_url=remote_url(root),
-    )
-    return CodeState(git=git, patch=build_patch(root))
+    git = read_state()
+    return CodeState(git=git, patch=build_patch(git.root))
 
 
 def capture_enabled() -> bool:
@@ -125,13 +111,7 @@ def capture(run: Run) -> None:
         warnings.warn(f"runsnap captured no code state: {exc}", stacklevel=3)
         return
     try:
-        state = resolve_code_state()
-    except Exception as exc:  # noqa: BLE001 - capture must never fail the run
-        warnings.warn(f"runsnap could not capture code state: {exc}", stacklevel=3)
-        _record_error(client, run_id, str(exc))
-        return
-    try:
-        _record_state(client, run, state)
+        _record_state(client, run, resolve_code_state())
     except Exception as exc:  # noqa: BLE001 - capture must never fail the run
         warnings.warn(f"runsnap could not capture code state: {exc}", stacklevel=3)
         _record_error(client, run_id, str(exc))

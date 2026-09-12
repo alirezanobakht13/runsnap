@@ -96,6 +96,14 @@ def test_keeps_empty_containers():
     assert flatten_model(WithEmpty()) == {"overrides": "{}", "stages": "[]"}
 
 
+def test_empty_model_yields_no_params():
+    class Empty(BaseModel):
+        pass
+
+    assert flatten_model(Empty()) == {}
+    assert flatten_model(Empty(), prefix="model") == {}
+
+
 def test_prefix_namespaces_every_key():
     assert flatten_model(HParams(), prefix="model") == {
         "model.seed": "42",

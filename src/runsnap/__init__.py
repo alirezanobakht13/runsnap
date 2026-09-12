@@ -25,7 +25,7 @@ def start_run(
     capture_code: bool = True,
     continues: str | None = None,
     **kwargs: Any,
-) -> Any:
+) -> LifecycleRun:
     """Start an MLflow run and record the code state that produced it.
 
     Arguments are forwarded unchanged to `mlflow.start_run()` and the run it

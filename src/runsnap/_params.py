@@ -28,20 +28,22 @@ def flatten_model(model: BaseModel, prefix: str = "") -> dict[str, str]:
     `use_amp` reads `true` and `limit` reads `null`. Sequences are single leaves
     rather than indexed keys, which keeps runs holding different-length
     sequences comparable in MLflow's run table, and empty containers are leaves
-    too so the field does not silently vanish.
+    too so the field does not silently vanish. A model with no fields has no
+    leaves and yields no params, with or without a prefix.
     """
-    data = model.model_dump(mode="json")
-    if not prefix and not data:
-        return {}
-    return _flatten(data, prefix)
+    return _flatten_fields(model.model_dump(mode="json"), prefix)
+
+
+def _flatten_fields(fields: Mapping[str, Any], prefix: str) -> dict[str, str]:
+    flat: dict[str, str] = {}
+    for key, value in fields.items():
+        flat.update(_flatten(value, f"{prefix}.{key}" if prefix else str(key)))
+    return flat
 
 
 def _flatten(value: Any, prefix: str) -> dict[str, str]:
     if isinstance(value, Mapping) and value:
-        flat: dict[str, str] = {}
-        for key, item in value.items():
-            flat.update(_flatten(item, f"{prefix}.{key}" if prefix else str(key)))
-        return flat
+        return _flatten_fields(value, prefix)
     return {prefix: _encode(value)}
 
 

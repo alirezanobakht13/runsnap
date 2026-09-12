@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+
+# MLflow local tracking store
+mlruns/
