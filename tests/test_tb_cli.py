@@ -69,6 +69,26 @@ def invoke(monkeypatch: pytest.MonkeyPatch, *args: str) -> None:
             raise
 
 
+def record_calls(
+    monkeypatch: pytest.MonkeyPatch, client: MlflowClient, method: str
+) -> list[tuple]:
+    """The positional arguments of each `method` call on `client`, in call order.
+
+    `client` also becomes the client the CLI queries, so the record covers
+    everything one invocation asks the tracking server for.
+    """
+    original = getattr(client, method)
+    calls: list[tuple] = []
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(client, method, spy)
+    monkeypatch.setattr(_cli, "make_client", lambda uri: client)
+    return calls
+
+
 def test_explicit_ids_and_names(tracking, tmp_path, cache, viewer, monkeypatch):
     first = logged_run(tracking, tmp_path, "baseline")
     logged_run(tracking, tmp_path, "ablation")
@@ -138,6 +158,35 @@ def test_experiment_resolves_duplicate_names(
     }
 
 
+def test_several_names_enumerate_experiments_once(
+    tracking, tmp_path, cache, viewer, monkeypatch
+):
+    logged_run(tracking, tmp_path, "first")
+    logged_run(tracking, tmp_path, "second")
+    logged_run(tracking, tmp_path, "third")
+    enumerations = record_calls(monkeypatch, tracking, "search_experiments")
+
+    invoke(monkeypatch, "first", "second", "third")
+
+    assert set(viewer) == {"first", "second", "third"}
+    assert len(enumerations) == 1
+
+
+@pytest.mark.parametrize(
+    "selection", [("baseline",), ("--filter", "params.optimizer = 'adamw'")]
+)
+def test_a_named_experiment_is_resolved_without_enumerating_them(
+    tracking, tmp_path, cache, viewer, monkeypatch, selection
+):
+    logged_run(tracking, tmp_path, "baseline")
+    enumerations = record_calls(monkeypatch, tracking, "search_experiments")
+
+    invoke(monkeypatch, *selection, "--experiment", "runsnap-tests")
+
+    assert set(viewer) == {"baseline"}
+    assert enumerations == []
+
+
 def test_chain_pulls_in_earlier_attempts(
     tracking, tmp_path, cache, viewer, monkeypatch
 ):
@@ -149,6 +198,22 @@ def test_chain_pulls_in_earlier_attempts(
     invoke(monkeypatch, "attempt-3", "--chain")
 
     assert set(viewer) == {"attempt-1", "attempt-2", "attempt-3"}
+
+
+def test_chain_fetches_each_attempt_once(
+    tracking, tmp_path, cache, viewer, monkeypatch
+):
+    first = logged_run(tracking, tmp_path, "attempt-1")
+    second = logged_run(tracking, tmp_path, "attempt-2", continues=first.info.run_id)
+    third = logged_run(tracking, tmp_path, "attempt-3", continues=second.info.run_id)
+    fetched = record_calls(monkeypatch, tracking, "get_run")
+
+    invoke(monkeypatch, "attempt-3", "--chain")
+
+    assert set(viewer) == {"attempt-1", "attempt-2", "attempt-3"}
+    assert sorted(run_id for (run_id,) in fetched) == sorted(
+        run.info.run_id for run in (first, second, third)
+    )
 
 
 def test_chain_shows_a_live_run_beside_a_cached_attempt(

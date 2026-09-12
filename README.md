@@ -24,7 +24,9 @@ runsnap checkout <run-id-or-name>  # branch at that commit, patch reapplied
 `checkout` lands in a new worktree, patch left uncommitted: `--no-worktree`,
 `--path`, `--branch`, `--commit`, `--force`, `--repo`. Capture never fails a run;
 disable it with `capture_code=False` or `RUNSNAP_CAPTURE_CODE=0`, and cap the
-patch with `RUNSNAP_MAX_PATCH_BYTES` (10 MiB).
+patch with `RUNSNAP_MAX_PATCH_BYTES` (10 MiB). A patch reaching the cap is
+abandoned there, leaving the run marked dirty with a `capture_error` naming the
+cap, no patch artifact, and no `patch_sha256`.
 
 **The patch carries uncommitted content of tracked files, so a secret in one is
 uploaded to the tracking server.** Ignored files are excluded.
@@ -105,6 +107,8 @@ continues, including images, histograms, and other media regardless of `--media`
 Runs logged on another host, or whose local directory is gone, use a snapshot
 of their uploaded artifacts: by default only scalars and text, with `--media`
 including other media. Rerun the command to fetch newer uploads for those runs.
+A run the tracking server will not hand over is reported as a warning and left
+out of the dashboard, so the rest of the selection still opens.
 Live and cached runs appear together under their MLflow names; unchanged
 downloads are reused from a local cache. TensorBoard prints its URL and runs in
 the foreground until Ctrl-C. If a live writer block exits while the dashboard
@@ -113,10 +117,12 @@ is open, rerun the command to view its final uploaded artifacts.
 During logging, writers flush events to local disk every 10 seconds by default;
 pass `runsnap.tensorboard(flush_secs=60)` to override the interval. The background
 thread waits 30 seconds between upload sync passes.
-Media rolls into shards after crossing 8 MiB; sealed shards become eligible for
-the next sync. An unannounced kill (`SIGKILL` or unhandled `SIGTERM`) keeps
-successfully uploaded data, but the open shard, pending sealed shards, and
-unsynced scalar updates can be lost. Slow or failed uploads extend this window,
-so neither 30 seconds nor one shard is a guaranteed loss bound. The size
-threshold is checked after writes, so a single large entry can exceed it.
+Media rolls into shards after crossing 8 MiB and scalars after 1 MiB; a sealed
+shard uploads once on the next sync. The open scalar shard uploads on every pass
+that finds it grown, so a dashboard keeps updating, while the open media shard
+waits until it seals. An unannounced kill (`SIGKILL` or unhandled `SIGTERM`)
+keeps successfully uploaded data, but the open media shard, pending sealed
+shards, and unsynced scalar updates can be lost. Slow or failed uploads extend
+this window, so neither 30 seconds nor one shard is a guaranteed loss bound. A
+size threshold is checked after writes, so a single large entry can exceed it.
 No signal handlers are installed.

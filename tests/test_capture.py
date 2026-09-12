@@ -166,7 +166,25 @@ def test_oversized_patch_is_skipped(in_repo: GitRepo, tracking, monkeypatch):
     recorded = tags(tracking, run_id)
     assert recorded[TAG_DIRTY] == "true"
     assert "too large" in recorded[TAG_CAPTURE_ERROR]
+    assert "10 byte" in recorded[TAG_CAPTURE_ERROR]
+    assert TAG_PATCH_SHA256 not in recorded
     assert artifact_paths(tracking, run_id) == set()
+
+
+def test_oversized_patch_leaves_the_run_usable(in_repo: GitRepo, tracking, monkeypatch):
+    monkeypatch.setenv("RUNSNAP_MAX_PATCH_BYTES", "10")
+    base = in_repo.git("rev-parse", "HEAD").strip()
+    in_repo.write("main.py", "print('a much longer line than ten bytes')\n")
+
+    with pytest.warns(UserWarning, match="exceeds"), runsnap.start_run() as run:
+        run_id = run.info.run_id
+    mlflow.log_metric("loss", 0.5, run_id=run_id)
+
+    recorded = tags(tracking, run_id)
+    assert recorded[TAG_COMMIT] == base
+    assert recorded[TAG_BRANCH] == "main"
+    assert recorded[MLFLOW_TAG_DIRTY] == "true"
+    assert tracking.get_run(run_id).data.metrics["loss"] == 0.5
 
 
 def test_mlflow_git_tags_are_filled_when_absent(in_repo: GitRepo, tracking):
@@ -238,7 +256,7 @@ def test_repository_with_no_commits_records_the_reason(
 def test_unexpected_git_failure_does_not_escape(
     in_repo: GitRepo, tracking, monkeypatch
 ):
-    def broken(root):
+    def broken(root, max_bytes):
         raise _git.GitError("git diff failed: catastrophe")
 
     monkeypatch.setattr(_capture, "build_patch", broken)

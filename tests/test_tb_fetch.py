@@ -2,6 +2,7 @@
 
 import shutil
 import socket
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +19,12 @@ from runsnap._tb_fetch import assemble_logdir, fetch_run
 from runsnap._tensorboard import TensorBoardWriter
 
 LIGHT = "events.out.tfevents.1.host.scalars"
+"""A scalar file named the way runs were written before sharding."""
+
+LIGHT_SHARDS = [
+    "events.out.tfevents.2.host.scalars.0",
+    "events.out.tfevents.3.host.scalars.1",
+]
 MEDIA = "events.out.tfevents.1.host.media.0"
 
 
@@ -56,6 +63,31 @@ def test_second_fetch_downloads_nothing(tracking, tmp_path: Path):
     assert (logdir / LIGHT).read_bytes() == b"scalar events"
     assert (logdir / "nested" / MEDIA).read_bytes() == b"nested events"
     assert not (logdir / "ignored.txt").exists()
+
+
+def test_sharded_scalars_are_all_fetched_without_media(tracking, tmp_path: Path):
+    with mlflow.start_run() as active:
+        source = tmp_path / "sharded"
+        source.mkdir()
+        for shard in LIGHT_SHARDS:
+            (source / shard).write_bytes(b"scalar events")
+        (source / MEDIA).write_bytes(b"media events")
+        tracking.log_artifacts(active.info.run_id, str(source), "tb")
+        run_id = active.info.run_id
+
+    light = fetch_run(tracking, run_id, cache_dir=tmp_path / "cache")
+    assert {p.name for p in light.rglob("events.*")} == set(LIGHT_SHARDS)
+
+
+def test_both_scalar_shapes_in_one_directory_are_fetched(tracking, tmp_path: Path):
+    run = logged_run(tracking, tmp_path)
+    source = tmp_path / "source"
+    for shard in LIGHT_SHARDS:
+        (source / shard).write_bytes(b"more scalar events")
+    tracking.log_artifacts(run.info.run_id, str(source), "tb")
+
+    light = fetch_run(tracking, run.info.run_id, cache_dir=tmp_path / "cache")
+    assert {p.name for p in light.rglob("events.*")} == {LIGHT, *LIGHT_SHARDS}
 
 
 def test_only_changed_and_new_files_are_downloaded(tracking, tmp_path: Path):
@@ -205,6 +237,60 @@ def test_run_names_stay_inside_assembled_directory(tracking, tmp_path, name):
         assert len(links) == 1
         assert links[0].is_symlink()
         assert (links[0] / LIGHT).exists()
+
+
+def test_selected_runs_are_fetched_together_whatever_the_finish_order(
+    tracking, tmp_path: Path
+):
+    names = ["first", "second", "third"]
+    runs = [named_run(tracking, tmp_path, name) for name in names]
+    position = {run.info.run_id: index for index, run in enumerate(runs)}
+    download = tracking.download_artifacts
+    started = threading.Barrier(len(runs))
+
+    def paced(run_id: str, artifact: str, destination: str) -> str:
+        """Hold every download until they are all running, then invert them.
+
+        A sequential fetch never fills the barrier, so a download that returns
+        at all is one that overlapped the others. The sleep that follows makes
+        the runs finish in the reverse of the order they were selected in.
+        """
+        started.wait(timeout=30)
+        time.sleep(0.05 * (len(runs) - position[run_id]))
+        return download(run_id, artifact, destination)
+
+    with (
+        patch.object(tracking, "download_artifacts", side_effect=paced),
+        assemble_logdir(tracking, runs, cache_dir=tmp_path / "cache") as logdir,
+    ):
+        assert {p.name for p in logdir.iterdir()} == set(names)
+        for name, run in zip(names, runs, strict=True):
+            link = logdir / name
+            assert run.info.run_id in link.resolve().parts
+            assert (link / LIGHT).read_bytes() == b"scalar events"
+
+
+def test_run_that_cannot_be_fetched_is_dropped_with_a_warning(tracking, tmp_path: Path):
+    reachable = named_run(tracking, tmp_path, "reachable")
+    unreachable = named_run(tracking, tmp_path, "unreachable")
+    other = named_run(tracking, tmp_path, "other")
+    download = tracking.download_artifacts
+
+    def refuse_one(run_id: str, artifact: str, destination: str) -> str:
+        if run_id == unreachable.info.run_id:
+            raise OSError("the artifact store is unreachable")
+        return download(run_id, artifact, destination)
+
+    with (
+        patch.object(tracking, "download_artifacts", side_effect=refuse_one),
+        pytest.warns(UserWarning, match=unreachable.info.run_id),
+        assemble_logdir(
+            tracking, [reachable, unreachable, other], cache_dir=tmp_path / "cache"
+        ) as logdir,
+    ):
+        events = {p.name: (p / LIGHT).read_bytes() for p in logdir.iterdir()}
+
+    assert events == {"reachable": b"scalar events", "other": b"scalar events"}
 
 
 def test_runs_without_events_are_omitted(tracking, tmp_path: Path):

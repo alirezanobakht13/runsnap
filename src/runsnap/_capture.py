@@ -10,7 +10,14 @@ from pathlib import Path
 from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 
-from runsnap._git import GitError, GitState, build_patch, find_repo_root, read_state
+from runsnap._git import (
+    GitError,
+    GitState,
+    PatchTooLarge,
+    build_patch,
+    find_repo_root,
+    read_state,
+)
 from runsnap._tags import (
     DEFAULT_MAX_PATCH_BYTES,
     ENV_CAPTURE_CODE,
@@ -35,14 +42,15 @@ MLFLOW_PARENT_RUN_ID = "mlflow.parentRunId"
 
 @dataclass(frozen=True)
 class CodeState:
-    """A repository's state plus the patch describing its uncommitted work."""
+    """A repository's state plus the patch describing its uncommitted work.
+
+    `dirty` is recorded rather than read off the patch: a patch abandoned at the
+    size ceiling is empty here while the working tree it came from is not.
+    """
 
     git: GitState
     patch: bytes
-
-    @property
-    def dirty(self) -> bool:
-        return bool(self.patch)
+    dirty: bool
 
     @property
     def patch_sha256(self) -> str:
@@ -55,15 +63,6 @@ def resolve_repo_root() -> Path:
     Raises `GitError` outside a repository and when `git` is unavailable.
     """
     return find_repo_root()
-
-
-def resolve_code_state() -> CodeState:
-    """The code state of the repository as it stands right now.
-
-    Raises `GitError` outside a repository and when it has no commit at `HEAD`.
-    """
-    git = read_state()
-    return CodeState(git=git, patch=build_patch(git.root))
 
 
 def capture_enabled() -> bool:
@@ -111,10 +110,28 @@ def capture(run: Run) -> None:
         warnings.warn(f"runsnap captured no code state: {exc}", stacklevel=3)
         return
     try:
-        _record_state(client, run, resolve_code_state())
+        _capture_state(client, run)
     except Exception as exc:  # noqa: BLE001 - capture must never fail the run
         warnings.warn(f"runsnap could not capture code state: {exc}", stacklevel=3)
         _record_error(client, run_id, str(exc))
+
+
+def _capture_state(client: MlflowClient, run: Run) -> None:
+    """Record the code state of the repository as it stands right now.
+
+    A diff passing the configured ceiling is abandoned where it stands: the run
+    is still marked dirty, but it carries no patch and no digest, since a patch
+    read only in part can neither be uploaded nor hashed.
+    """
+    git = read_state()
+    try:
+        patch = build_patch(git.root, max_patch_bytes())
+    except PatchTooLarge as exc:
+        warnings.warn(f"runsnap skipped the code state patch: {exc}", stacklevel=4)
+        _record_state(client, run, CodeState(git=git, patch=b"", dirty=True))
+        _record_error(client, run.info.run_id, str(exc))
+        return
+    _record_state(client, run, CodeState(git=git, patch=patch, dirty=bool(patch)))
 
 
 def _record_error(client: MlflowClient, run_id: str, message: str) -> None:
@@ -133,7 +150,7 @@ def _record_state(client: MlflowClient, run: Run, state: CodeState) -> None:
         client.set_tag(run_id, TAG_BRANCH, state.git.branch)
     if state.git.repo_url is not None:
         client.set_tag(run_id, TAG_REPO_URL, state.git.repo_url)
-    if state.dirty:
+    if state.patch:
         client.set_tag(run_id, TAG_PATCH_SHA256, state.patch_sha256)
         _record_patch(client, run, state)
     _mirror_mlflow_tags(client, run, state)
@@ -146,19 +163,6 @@ def _record_patch(client: MlflowClient, run: Run, state: CodeState) -> None:
     if holder is not None:
         client.set_tag(run_id, TAG_PATCH_RUN_ID, holder)
         _patch_holders[run_id] = (holder, digest)
-        return
-    ceiling = max_patch_bytes()
-    if len(state.patch) > ceiling:
-        warnings.warn(
-            f"runsnap skipped the code state patch: "
-            f"{len(state.patch)} bytes exceeds the {ceiling} byte limit",
-            stacklevel=4,
-        )
-        client.set_tag(
-            run_id,
-            TAG_CAPTURE_ERROR,
-            f"patch too large: {len(state.patch)} bytes exceeds {ceiling}",
-        )
         return
     with tempfile.TemporaryDirectory() as tmp:
         local = Path(tmp) / PATCH_ARTIFACT_NAME

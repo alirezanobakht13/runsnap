@@ -5,6 +5,8 @@ from pathlib import Path
 
 import mlflow
 import pytest
+from mlflow.tracking import MlflowClient
+from mlflow.utils.validation import MAX_PARAMS_TAGS_PER_BATCH
 from pydantic import BaseModel, ValidationError
 
 import runsnap
@@ -26,6 +28,26 @@ def artifact_paths(client: mlflow.MlflowClient, run_id: str) -> set[str]:
 
 def read_artifact(client: mlflow.MlflowClient, run_id: str, path: str) -> dict:
     return json.loads(Path(client.download_artifacts(run_id, path)).read_text())
+
+
+def record_batches(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """The param keys of each `log_batch` call, in call order."""
+    calls: list[list[str]] = []
+    original = MlflowClient.log_batch
+
+    def spy(self, run_id, metrics=(), params=(), tags=(), synchronous=None):
+        calls.append([param.key for param in params])
+        return original(
+            self,
+            run_id,
+            metrics=metrics,
+            params=params,
+            tags=tags,
+            synchronous=synchronous,
+        )
+
+    monkeypatch.setattr(MlflowClient, "log_batch", spy)
+    return calls
 
 
 class Scheduler(BaseModel):
@@ -131,6 +153,36 @@ def test_logs_to_a_run_named_explicitly(tracking):
         pass
     runsnap.log_params(HParams(seed=3), run_id=run.info.run_id)
     assert tracking.get_run(run.info.run_id).data.params["seed"] == "3"
+
+
+def test_writes_many_leaves_in_full_batches_plus_a_remainder(tracking, monkeypatch):
+    class Wide(BaseModel):
+        values: dict[str, int] = {}
+
+    leaves = MAX_PARAMS_TAGS_PER_BATCH * 2 + 3
+    hp = Wide(values={f"f{i}": i for i in range(leaves)})
+    calls = record_batches(monkeypatch)
+
+    with mlflow.start_run() as run:
+        runsnap.log_params(hp)
+
+    assert [len(batch) for batch in calls] == [
+        MAX_PARAMS_TAGS_PER_BATCH,
+        MAX_PARAMS_TAGS_PER_BATCH,
+        3,
+    ]
+    params = tracking.get_run(run.info.run_id).data.params
+    assert params == {f"values.f{i}": str(i) for i in range(leaves)}
+
+
+def test_writes_a_small_model_in_one_batch(tracking, monkeypatch):
+    calls = record_batches(monkeypatch)
+
+    with mlflow.start_run() as run:
+        runsnap.log_params(HParams(seed=9))
+
+    assert [sorted(batch) for batch in calls] == [["opt.lr", "seed"]]
+    assert tracking.get_run(run.info.run_id).data.params["seed"] == "9"
 
 
 def test_rejects_non_pydantic_input(tracking):

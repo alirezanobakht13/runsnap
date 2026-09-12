@@ -28,7 +28,7 @@ from runsnap._git import (
     patch_files,
     remove_worktree,
 )
-from runsnap._lifecycle import attempt_chain
+from runsnap._lifecycle import attempt_runs
 from runsnap._tags import (
     PATCH_ARTIFACT_PATH,
     TAG_BRANCH,
@@ -60,21 +60,28 @@ def make_client(tracking_uri: str | None = None) -> MlflowClient:
 
 
 def resolve_run(
-    client: MlflowClient, run_ref: str, experiment: str | None = None
+    client: MlflowClient,
+    run_ref: str,
+    experiment: str | None = None,
+    experiment_ids: list[str] | None = None,
 ) -> Run:
     """The run `run_ref` names, as either a run id or a run name.
 
     A value in MLflow's run id form is looked up directly; anything else is
     matched against run names, across every experiment unless `experiment`
-    narrows the search.
+    narrows the search. `experiment_ids` are the ids to search, already
+    resolved, so a caller resolving several names asks the server for the
+    experiment list once.
     """
     if RUN_ID.match(run_ref):
         try:
             return client.get_run(run_ref)
         except Exception as exc:
             raise CliError(f"no run {run_ref} on {client.tracking_uri}: {exc}") from exc
+    if experiment_ids is None:
+        experiment_ids = _experiment_ids(client, experiment)
     matches = client.search_runs(
-        _experiment_ids(client, experiment),
+        experiment_ids,
         filter_string=f"tags.\"{MLFLOW_RUN_NAME_TAG}\" = '{_quote(run_ref)}'",
     )
     if not matches:
@@ -120,11 +127,19 @@ def _tb_runs(
     experiment: str | None,
     filter_string: str,
 ) -> list[Run]:
-    runs = [resolve_run(client, ref, experiment) for ref in run_refs]
+    """The selected runs, enumerating the server's experiments at most once."""
     if run_refs and not filter_string:
-        return runs
-    selected_ids = {run.info.run_id for run in runs}
+        ids = (
+            _experiment_ids(client, experiment)
+            if any(not RUN_ID.match(ref) for ref in run_refs)
+            else None
+        )
+        return [resolve_run(client, ref, experiment, ids) for ref in run_refs]
     experiment_ids = _experiment_ids(client, experiment)
+    selected_ids = {
+        resolve_run(client, ref, experiment, experiment_ids).info.run_id
+        for ref in run_refs
+    }
     if not experiment_ids:
         return []
     matches = []
@@ -145,9 +160,8 @@ def _with_chains(client: MlflowClient, runs: list[Run]) -> list[Run]:
     """`runs` followed by every attempt they continue, each run appearing once."""
     extended = {run.info.run_id: run for run in runs}
     for run in runs:
-        for run_id in attempt_chain(run.info.run_id, client):
-            if run_id not in extended:
-                extended[run_id] = client.get_run(run_id)
+        for attempt in attempt_runs(client, run.info.run_id):
+            extended.setdefault(attempt.info.run_id, attempt)
     return list(extended.values())
 
 

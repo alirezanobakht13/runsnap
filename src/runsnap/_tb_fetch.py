@@ -3,8 +3,10 @@
 import os
 import re
 import socket
+import warnings
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from itertools import count
 from pathlib import Path, PurePosixPath
@@ -19,6 +21,16 @@ from runsnap._tags import (
     TB_TAG_LOCAL_DIR,
     TB_TAG_LOCAL_HOST,
 )
+
+FETCH_WORKERS = 8
+"""Runs fetched at once, a cap on concurrent downloads from one server."""
+
+LIGHT_NAME = re.compile(rf"{re.escape(TB_LIGHT_SUFFIX)}(\.\d+)?$")
+"""Matches a scalar event file, sharded or not.
+
+Runs written before the scalar stream was sharded end in `.scalars`; sharded
+ones end in `.scalars.<n>`, and a resumed run's directory can hold both.
+"""
 
 
 def fetch_run(
@@ -44,7 +56,7 @@ def fetch_run(
         relative = PurePosixPath(artifact.path).relative_to(TB_ARTIFACT_DIR)
         if ".." in relative.parts:
             raise ValueError(f"Invalid TensorBoard artifact path: {artifact.path}")
-        is_light = relative.name.endswith(TB_LIGHT_SUFFIX)
+        is_light = LIGHT_NAME.search(relative.name) is not None
         if not media and not is_light:
             continue
         target = logdir.joinpath(*relative.parts)
@@ -85,17 +97,24 @@ def assemble_logdir(
 
     A run still being written on this host is linked to the directory it is
     being written to, so TensorBoard tails the growing files themselves; every
-    other run is downloaded into the cache first.
+    other run is downloaded into the cache first, several runs at a time.
 
     Keep this context open while TensorBoard runs. Its links are removed on
     exit, while downloaded event files remain available for later invocations.
-    Runs without event data are omitted.
+    Runs without event data are omitted, as are runs whose fetch failed.
     """
     selected = {run.info.run_id: run for run in runs}
+    live = {run_id: _live_logdir(run) for run_id, run in selected.items()}
+    fetched = _fetch_runs(
+        client,
+        [run_id for run_id, path in live.items() if path is None],
+        cache_dir=cache_dir,
+        media=media,
+    )
     paths = {
-        run_id: _live_logdir(run)
-        or fetch_run(client, run_id, cache_dir=cache_dir, media=media)
-        for run_id, run in selected.items()
+        run_id: path if path is not None else fetched[run_id]
+        for run_id, path in live.items()
+        if path is not None or run_id in fetched
     }
     names = {
         run_id: _run_name(selected[run_id])
@@ -113,6 +132,37 @@ def assemble_logdir(
         for name, run_id in links.items():
             (logdir / name).symlink_to(paths[run_id], target_is_directory=True)
         yield logdir
+
+
+def _fetch_runs(
+    client: MlflowClient,
+    run_ids: Sequence[str],
+    *,
+    cache_dir: Path | None,
+    media: bool,
+) -> dict[str, Path]:
+    """Cache several runs at once, keyed in the order they were asked for.
+
+    A run the tracking server will not hand over is reported as a warning and
+    left out, so the runs that were fetched can still be viewed together.
+    """
+    if not run_ids:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(FETCH_WORKERS, len(run_ids))) as pool:
+        futures = {
+            run_id: pool.submit(
+                fetch_run, client, run_id, cache_dir=cache_dir, media=media
+            )
+            for run_id in run_ids
+        }
+    fetched: dict[str, Path] = {}
+    for run_id, future in futures.items():
+        try:
+            fetched[run_id] = future.result()
+        except Exception as exc:  # noqa: BLE001 - one unreachable run is not
+            # a reason to abandon the runs that were fetched.
+            warnings.warn(f"runsnap could not fetch run {run_id}: {exc}", stacklevel=4)
+    return fetched
 
 
 def _distinct_names(base: str, run_id: str) -> Iterator[str]:

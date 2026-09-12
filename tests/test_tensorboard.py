@@ -19,8 +19,9 @@ from runsnap._tags import (
     TB_TAG_LOCAL_DIR,
     TB_TAG_LOCAL_HOST,
     TB_TAG_LOGDIR,
+    tb_light_suffix,
 )
-from runsnap._tensorboard import TensorBoardWriter
+from runsnap._tensorboard import TensorBoardWriter, _Sync
 
 
 def event_files(logdir: Path) -> list[Path]:
@@ -29,6 +30,15 @@ def event_files(logdir: Path) -> list[Path]:
 
 def media_files(logdir: Path) -> list[Path]:
     return sorted(p for p in event_files(logdir) if TB_MEDIA_SUFFIX in p.name)
+
+
+def light_files(logdir: Path) -> list[Path]:
+    return sorted(p for p in event_files(logdir) if TB_LIGHT_SUFFIX in p.name)
+
+
+def test_scalar_shard_suffix_carries_the_shard_index():
+    assert tb_light_suffix(0) == ".scalars.0"
+    assert tb_light_suffix(12) == ".scalars.12"
 
 
 def image(size: int = 64) -> np.ndarray:
@@ -57,7 +67,7 @@ def test_scalars_and_media_land_in_different_files(logdir: Path):
     writer.add_image("train/sample", image(), 1)
     writer.close()
 
-    light = [p for p in event_files(logdir) if p.name.endswith(TB_LIGHT_SUFFIX)]
+    light = light_files(logdir)
     media = media_files(logdir)
     assert len(light) == 1
     assert len(media) == 1
@@ -75,7 +85,7 @@ def test_text_follows_scalars_and_other_methods_follow_media(logdir: Path):
     writer.add_histogram("weights", np.arange(100.0), 1)
     writer.close()
 
-    light = next(p for p in event_files(logdir) if p.name.endswith(TB_LIGHT_SUFFIX))
+    light = light_files(logdir)[0]
     media = media_files(logdir)[0]
 
     assert accumulate_tags(light)["tensors"] == ["notes/text_summary"]
@@ -90,9 +100,10 @@ def accumulate_tags(event_file: Path) -> dict[str, list[str]]:
 
 
 def read_light(logdir: Path) -> EventAccumulator:
-    """The scalar event file, read in isolation from the media shards."""
-    light = next(p for p in event_files(logdir) if p.name.endswith(TB_LIGHT_SUFFIX))
-    accumulator = EventAccumulator(str(light))
+    """The only scalar shard, read in isolation from the media shards."""
+    light = light_files(logdir)
+    assert len(light) == 1
+    accumulator = EventAccumulator(str(light[0]))
     accumulator.Reload()
     return accumulator
 
@@ -151,9 +162,9 @@ def test_scalar_file_is_a_small_fraction_of_the_total(logdir: Path):
         writer.add_image("train/sample", image(), step)
     writer.close()
 
-    light = next(p for p in event_files(logdir) if p.name.endswith(TB_LIGHT_SUFFIX))
+    light = sum(p.stat().st_size for p in light_files(logdir))
     total = sum(p.stat().st_size for p in event_files(logdir))
-    assert light.stat().st_size * 10 < total
+    assert light * 10 < total
 
 
 def test_histogram_default_bins_are_compact(logdir: Path):
@@ -201,6 +212,35 @@ def test_media_rolls_into_distinctly_named_shards(logdir: Path):
     assert len({p.name for p in shards}) == len(shards)
 
 
+def test_scalars_roll_into_distinctly_named_shards(logdir: Path):
+    writer = TensorBoardWriter(logdir, light_shard_max_bytes=512)
+    for step in range(100):
+        writer.add_scalar("train/loss", 1.0 / (step + 1), step)
+        # Flushing keeps the size on disk current, so the roll is deterministic.
+        writer.flush()
+    writer.close()
+
+    shards = light_files(logdir)
+    assert len(shards) > 2
+    assert len({p.name for p in shards}) == len(shards)
+    # Sharding is invisible to a viewer: the directory reads as one stream.
+    points = accumulate(logdir).Scalars("train/loss")
+    assert [point.step for point in points] == list(range(100))
+
+
+def test_each_stream_rolls_at_its_own_threshold(logdir: Path):
+    writer = TensorBoardWriter(
+        logdir, shard_max_bytes=16 * 1024, light_shard_max_bytes=10 * 1024 * 1024
+    )
+    for step in range(40):
+        writer.add_scalar("train/loss", 1.0 / (step + 1), step)
+        writer.add_image("train/sample", image(), step)
+    writer.close()
+
+    assert len(media_files(logdir)) > 1
+    assert len(light_files(logdir)) == 1
+
+
 def test_shards_sealed_in_the_same_second_do_not_collide(logdir: Path):
     writer = TensorBoardWriter(logdir, shard_max_bytes=1)
     for step in range(6):
@@ -227,7 +267,7 @@ def test_paths_name_the_light_file_and_the_open_shard(logdir: Path):
     writer.close()
 
     assert light.parent == logdir
-    assert light.name.endswith(TB_LIGHT_SUFFIX)
+    assert light.name.endswith(tb_light_suffix(0))
     assert open_shard != sealed
     assert {sealed, open_shard} <= set(media_files(logdir))
 
@@ -287,6 +327,76 @@ def wait_for_shards(client, run_id: str, count: int, timeout: float = 20.0):
     raise AssertionError(f"only {uploaded_shards(client, run_id)} were uploaded")
 
 
+def wait_for_bytes(
+    writer: TensorBoardWriter, path: Path, size: int, timeout: float = 20.0
+) -> int:
+    """Poll until `path` holds more than `size` bytes, so no queued write is raced.
+
+    The underlying writer hands each event to a thread of its own, and `flush()`
+    pushes only what that thread has already written, so a write reaches disk
+    some time after the call that made it.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        writer.flush()
+        grown = path.stat().st_size
+        if grown > size:
+            return grown
+        time.sleep(0.02)
+    raise AssertionError(f"{path.name} stayed at {size} bytes")
+
+
+def record_uploads(monkeypatch) -> list[str]:
+    """The name of every file uploaded from here on, in upload order."""
+    uploaded: list[str] = []
+    original = MlflowClient.log_artifact
+
+    def spy(self, run_id, local_path, artifact_path=None):
+        uploaded.append(Path(local_path).name)
+        return original(self, run_id, local_path, artifact_path=artifact_path)
+
+    monkeypatch.setattr(MlflowClient, "log_artifact", spy)
+    return uploaded
+
+
+def test_open_scalar_shard_uploads_on_every_pass_that_finds_it_grown(
+    tracking, logdir, monkeypatch
+):
+    uploaded = record_uploads(monkeypatch)
+    with runsnap.start_run(capture_code=False) as run:
+        writer = TensorBoardWriter(logdir)
+        sync = _Sync(tracking, run.info.run_id, writer, interval=60.0)
+        light = writer.light_path
+
+        writer.add_scalar("train/loss", 0.5, 1)
+        written = wait_for_bytes(writer, light, 0)
+        sync.sync()
+        assert uploaded == [light.name]
+
+        writer.add_scalar("train/loss", 0.25, 2)
+        wait_for_bytes(writer, light, written)
+        sync.sync()
+        assert uploaded == [light.name, light.name]
+        writer.close()
+
+
+def test_sync_pass_over_an_unchanged_directory_uploads_nothing(
+    tracking, logdir, monkeypatch
+):
+    uploaded = record_uploads(monkeypatch)
+    with runsnap.start_run(capture_code=False) as run:
+        writer = TensorBoardWriter(logdir)
+        sync = _Sync(tracking, run.info.run_id, writer, interval=60.0)
+        writer.add_scalar("train/loss", 0.5, 1)
+        wait_for_bytes(writer, writer.light_path, 0)
+        sync.sync()
+        uploaded.clear()
+
+        sync.sync()
+        assert uploaded == []
+        writer.close()
+
+
 def test_sealed_shards_upload_before_the_run_ends(tracking):
     with runsnap.start_run(capture_code=False) as run:
         run_id = run.info.run_id
@@ -300,15 +410,7 @@ def test_sealed_shards_upload_before_the_run_ends(tracking):
 
 
 def test_sealed_shard_is_not_uploaded_twice(tracking, monkeypatch):
-    uploaded: list[str] = []
-    original = MlflowClient.log_artifact
-
-    def spy(self, run_id, local_path, artifact_path=None):
-        uploaded.append(Path(local_path).name)
-        return original(self, run_id, local_path, artifact_path=artifact_path)
-
-    monkeypatch.setattr(MlflowClient, "log_artifact", spy)
-
+    uploaded = record_uploads(monkeypatch)
     with (
         runsnap.start_run(capture_code=False) as run,
         runsnap.tensorboard(shard_max_bytes=16 * 1024, sync_interval=0.05) as writer,
@@ -390,7 +492,7 @@ def test_refused_tags_warn_and_still_yield_a_writer(tracking, monkeypatch):
 def flush_intervals(writer: TensorBoardWriter) -> set[float]:
     """The flush interval each of the two underlying writers is running with."""
     intervals = set()
-    for underlying in (writer._light, writer._media):
+    for underlying in (writer._light.writer, writer._media.writer):
         file_writer = underlying.file_writer
         assert isinstance(file_writer, FileWriter)
         intervals.add(file_writer.event_writer._flush_secs)

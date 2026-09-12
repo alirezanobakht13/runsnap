@@ -1,6 +1,7 @@
 """Tests for the git primitives, run against real temporary repositories."""
 
 import os
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from conftest import GitRepo
 
 from runsnap._git import (
     GitError,
+    PatchTooLarge,
     add_worktree,
     apply_patch,
     build_patch,
@@ -20,6 +22,9 @@ from runsnap._git import (
     remote_url,
     unquote_path,
 )
+
+ROOMY = 10 * 1024 * 1024
+"""A ceiling no test tree comes near, so the cap stays out of the way."""
 
 
 def make_dirty(repo: GitRepo) -> str:
@@ -102,7 +107,7 @@ def test_build_patch_leaves_git_status_untouched(repo: GitRepo) -> None:
     make_dirty(repo)
     before = repo.status()
 
-    build_patch(repo.path)
+    build_patch(repo.path, ROOMY)
 
     assert repo.status() == before
 
@@ -111,7 +116,7 @@ def test_patch_round_trip_reproduces_the_working_tree(
     repo: GitRepo, tmp_path: Path
 ) -> None:
     base = make_dirty(repo)
-    patch = build_patch(repo.path)
+    patch = build_patch(repo.path, ROOMY)
 
     clone = repo.clone_at(base, tmp_path / "clone")
     apply_patch(clone, patch)
@@ -125,7 +130,7 @@ def test_patch_round_trip_reproduces_the_working_tree(
 
 def test_patch_excludes_ignored_files(repo: GitRepo, tmp_path: Path) -> None:
     base = make_dirty(repo)
-    patch = build_patch(repo.path)
+    patch = build_patch(repo.path, ROOMY)
 
     assert b"ignored.txt" not in patch
 
@@ -139,7 +144,34 @@ def test_clean_tree_produces_an_empty_patch(repo: GitRepo) -> None:
     repo.write("a.txt", "one\n")
     repo.commit("base")
 
-    assert build_patch(repo.path) == b""
+    assert build_patch(repo.path, ROOMY) == b""
+
+
+def test_patch_over_the_ceiling_is_abandoned_unread(repo: GitRepo) -> None:
+    repo.write("a.txt", "one\n")
+    repo.commit("base")
+    repo.write("big.bin", os.urandom(4 * 1024 * 1024))
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(PatchTooLarge, match="1024 byte limit"):
+            build_patch(repo.path, 1024)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 1024 * 1024
+
+
+def test_patch_just_under_the_ceiling_is_returned_whole(repo: GitRepo) -> None:
+    repo.write("a.txt", "one\n")
+    repo.commit("base")
+    repo.write("b.txt", "two\n")
+
+    patch = build_patch(repo.path, ROOMY)
+
+    assert b"b.txt" in patch
+    assert len(patch) < ROOMY
 
 
 @pytest.mark.parametrize(
@@ -279,7 +311,7 @@ def test_patch_files_lists_every_path_git_names(repo: GitRepo) -> None:
     (repo.path / "gone.txt").unlink()
     repo.write("bin.dat", b"\x00\x01\x02\xff")
 
-    files = patch_files(build_patch(repo.path))
+    files = patch_files(build_patch(repo.path, ROOMY))
 
     assert sorted(files) == sorted(
         ["café.txt", 'say "hi".txt', "dir b/x.txt", "new.txt", "gone.txt", "bin.dat"]
@@ -293,7 +325,7 @@ def test_worktree_reconstructs_the_recorded_state(
     base = repo.commit("base")
     repo.write("a.txt", "one\ntwo\n")
     repo.write("b.txt", "new\n")
-    patch = build_patch(repo.path)
+    patch = build_patch(repo.path, ROOMY)
     expected = snapshot(repo.path)
 
     tree = add_worktree(repo.path, tmp_path / "worktree", "restored", base)
@@ -309,7 +341,7 @@ def test_in_place_checkout_reconstructs_the_recorded_state(
     base = repo.commit("base")
     repo.write("a.txt", "one\ntwo\n")
     repo.write("b.txt", "new\n")
-    patch = build_patch(repo.path)
+    patch = build_patch(repo.path, ROOMY)
     expected = snapshot(repo.path)
 
     clone = repo.clone_at(base, tmp_path / "clone")

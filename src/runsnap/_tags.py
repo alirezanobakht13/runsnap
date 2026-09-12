@@ -47,6 +47,11 @@ TB_LIGHT_SUFFIX = ".scalars"
 TB_MEDIA_SUFFIX = ".media"
 
 
+def tb_light_suffix(shard: int) -> str:
+    """Filename suffix for scalar shard number `shard`."""
+    return f"{TB_LIGHT_SUFFIX}.{shard}"
+
+
 def tb_media_suffix(shard: int) -> str:
     """Filename suffix for media shard number `shard`."""
     return f"{TB_MEDIA_SUFFIX}.{shard}"
@@ -54,5 +59,6 @@ def tb_media_suffix(shard: int) -> str:
 
 TB_HISTOGRAM_BINS = 30
 TB_SHARD_MAX_BYTES = 8 * 1024 * 1024
+TB_LIGHT_SHARD_MAX_BYTES = 1024 * 1024
 TB_SYNC_INTERVAL_SECONDS = 30.0
 TB_FLUSH_SECONDS = 10

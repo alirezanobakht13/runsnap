@@ -5,6 +5,7 @@ from types import TracebackType
 from typing import Literal
 
 import mlflow
+from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 
 from runsnap._tags import TAG_CONTINUES, TAG_FAILURE_CAUSE
@@ -67,6 +68,28 @@ def record_continues(run_id: str, continues: str) -> None:
         )
 
 
+def attempt_runs(client: MlflowClient, run_id: str) -> list[Run]:
+    """The run `run_id` and every attempt it continues, newest attempt first.
+
+    Each run in the chain is fetched once, so a caller that needs the runs
+    themselves does not have to fetch them again.
+
+    Raises `ValueError` when the chain revisits a run, and lets MLflow's own
+    error through when a recorded predecessor is not on the tracking server.
+    """
+    chain: list[Run] = []
+    seen: set[str] = set()
+    current: str | None = run_id
+    while current is not None:
+        if current in seen:
+            raise ValueError(f"the chain of attempts revisits run {current}")
+        seen.add(current)
+        run = client.get_run(current)
+        chain.append(run)
+        current = run.data.tags.get(TAG_CONTINUES)
+    return chain
+
+
 def attempt_chain(run_id: str, client: MlflowClient | None = None) -> list[str]:
     """`run_id` and every attempt it continues, newest attempt first.
 
@@ -76,17 +99,7 @@ def attempt_chain(run_id: str, client: MlflowClient | None = None) -> list[str]:
     Raises `ValueError` when the chain revisits a run, and lets MLflow's own
     error through when a recorded predecessor is not on the tracking server.
     """
-    client = client or MlflowClient()
-    chain: list[str] = []
-    seen: set[str] = set()
-    current: str | None = run_id
-    while current is not None:
-        if current in seen:
-            raise ValueError(f"the chain of attempts revisits run {current}")
-        seen.add(current)
-        chain.append(current)
-        current = client.get_run(current).data.tags.get(TAG_CONTINUES)
-    return chain
+    return [run.info.run_id for run in attempt_runs(client or MlflowClient(), run_id)]
 
 
 def _is_active(run_id: str) -> bool:

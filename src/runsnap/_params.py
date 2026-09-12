@@ -8,8 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import mlflow
+from mlflow.entities import Param
 from mlflow.tracking import MlflowClient
-from mlflow.utils.validation import MAX_PARAM_VAL_LENGTH
+from mlflow.utils.validation import (
+    MAX_PARAM_VAL_LENGTH,
+    MAX_PARAMS_TAGS_PER_BATCH,
+)
 from pydantic import BaseModel
 
 from runsnap._tags import (
@@ -66,6 +70,9 @@ def log_params(
     artifact is the authoritative record: it keeps the fidelity the params
     encoding loses, and `load_params()` reads it back into the model class.
 
+    Params go to the tracking server in batches, so a model of any size costs
+    one request per hundred leaves rather than one per leaf.
+
     Logs to the active run unless `run_id` names another one.
     """
     if not isinstance(model, BaseModel):
@@ -75,6 +82,7 @@ def log_params(
         )
     client = MlflowClient()
     target = _resolve_run_id(run_id)
+    params: list[Param] = []
     for key, value in flatten_model(model, prefix).items():
         if len(value) > MAX_PARAM_VAL_LENGTH:
             warnings.warn(
@@ -83,7 +91,10 @@ def log_params(
                 f"{hparams_artifact_path(name)}",
                 stacklevel=2,
             )
-        client.log_param(target, key, value)
+        params.append(Param(key, value))
+    for start in range(0, len(params), MAX_PARAMS_TAGS_PER_BATCH):
+        batch = params[start : start + MAX_PARAMS_TAGS_PER_BATCH]
+        client.log_batch(target, params=batch)
     client.log_dict(
         target,
         {

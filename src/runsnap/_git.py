@@ -15,6 +15,14 @@ class GitError(RuntimeError):
     """A git command failed, or git itself could not be run."""
 
 
+class PatchTooLarge(GitError):
+    """A patch passed the byte ceiling it was read under and was abandoned."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"patch too large: exceeds the {limit} byte limit")
+        self.limit = limit
+
+
 def _git(
     args: Sequence[str],
     cwd: Path | str,
@@ -129,13 +137,61 @@ def read_state(path: Path | str | None = None) -> GitState:
     )
 
 
-def build_patch(root: Path | str) -> bytes:
+_READ_CHUNK = 64 * 1024
+
+
+def _git_capped(
+    args: Sequence[str],
+    cwd: Path | str,
+    *,
+    env: dict[str, str] | None = None,
+    limit: int,
+) -> bytes:
+    """Raw stdout of `git <args>`, read in chunks and abandoned past `limit` bytes.
+
+    Raises `PatchTooLarge` the moment the output passes `limit`, killing git
+    rather than draining it, so nothing larger than one chunk past the ceiling
+    is ever held.
+    """
+    try:
+        process = subprocess.Popen(
+            ["git", *args],
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise GitError(f"could not run git: {exc}") from exc
+    chunks: list[bytes] = []
+    total = 0
+    with process:
+        stdout, stderr = process.stdout, process.stderr
+        if stdout is None or stderr is None:
+            process.kill()
+            raise GitError(f"git {' '.join(args)} gave no output to read")
+        for chunk in iter(lambda: stdout.read(_READ_CHUNK), b""):
+            total += len(chunk)
+            if total > limit:
+                process.kill()
+                raise PatchTooLarge(limit)
+            chunks.append(chunk)
+        failure = stderr.read().decode(errors="replace").strip()
+    if process.returncode != 0:
+        raise GitError(f"git {' '.join(args)} failed: {failure}")
+    return b"".join(chunks)
+
+
+def build_patch(root: Path | str, max_bytes: int) -> bytes:
     """Every working-tree change against `HEAD` as one applicable patch.
 
     Staged changes, unstaged changes, untracked files, deletions, mode changes,
     and binary content are all included; ignored files are not. The repository's
     own index is copied first and only the copy is written to, so the caller's
     staging area, working tree, and `HEAD` are left untouched.
+
+    Raises `PatchTooLarge` once the diff passes `max_bytes`, at which point it is
+    abandoned unread; the work and the memory are both bounded by the ceiling.
     """
     index = Path(_git_text(["rev-parse", "--git-path", "index"], root))
     if not index.is_absolute():
@@ -146,7 +202,12 @@ def build_patch(root: Path | str) -> bytes:
             shutil.copyfile(index, index_copy)
         env = {**os.environ, "GIT_INDEX_FILE": str(index_copy)}
         _git(["add", "-A", "-N", "--", "."], root, env=env)
-        return _git(["diff", "--no-ext-diff", "--binary", "HEAD"], root, env=env)
+        return _git_capped(
+            ["diff", "--no-ext-diff", "--binary", "HEAD"],
+            root,
+            env=env,
+            limit=max_bytes,
+        )
 
 
 _ESCAPES = {b"n": b"\n", b"t": b"\t", b"r": b"\r", b'"': b'"', b"\\": b"\\"}
