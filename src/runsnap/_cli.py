@@ -1,9 +1,12 @@
 """The `runsnap` command line application."""
 
+import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+from contextlib import ExitStack
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -22,9 +25,12 @@ from runsnap._git import (
     commit_exists,
     current_branch,
     delete_branch,
+    diff_commits,
     find_repo_root,
     head_commit,
     is_dirty,
+    list_branches,
+    list_worktrees,
     patch_files,
     remove_worktree,
 )
@@ -35,6 +41,8 @@ from runsnap._tags import (
     TAG_COMMIT,
     TAG_CONTINUES,
     TAG_DIRTY,
+    TAG_INVOCATION_ARGV,
+    TAG_INVOCATION_CWD,
     TAG_PATCH_RUN_ID,
     TAG_PATCH_SHA256,
 )
@@ -247,9 +255,47 @@ def download_patch(client: MlflowClient, run: Run) -> bytes:
 
 
 @app.command
+def patch(
+    run_ref: str,
+    *,
+    output: Path | None = None,
+    experiment: str | None = None,
+    tracking_uri: str | None = None,
+) -> None:
+    """Export a run's recorded patch without needing a repository.
+
+    Parameters
+    ----------
+    run_ref
+        An MLflow run id or a run name.
+    output
+        Destination file, defaulting to standard output.
+    experiment
+        Name of the experiment to resolve a run name in.
+    tracking_uri
+        Tracking server to query, overriding the MLflow environment.
+    """
+    client = make_client(tracking_uri)
+    run = resolve_run(client, run_ref, experiment)
+    tags = code_state(run)
+    if tags.get(TAG_DIRTY) != "true":
+        print(f"run {run.info.run_id} has no patch (clean tree)", file=sys.stderr)
+        return
+    recorded = download_patch(client, run)
+    if output is None:
+        sys.stdout.buffer.write(recorded)
+    else:
+        try:
+            output.write_bytes(recorded)
+        except OSError as exc:
+            raise CliError(f"could not write patch to {output}: {exc}") from exc
+
+
+@app.command
 def show(
     run_ref: str,
     *,
+    patch: bool = False,
     experiment: str | None = None,
     tracking_uri: str | None = None,
 ) -> None:
@@ -259,6 +305,8 @@ def show(
     ----------
     run_ref
         An MLflow run id or a run name.
+    patch
+        Append the recorded patch bytes after the code-state report.
     experiment
         Name of the experiment to resolve a run name in.
     tracking_uri
@@ -281,8 +329,192 @@ def show(
     print(f"patch:   sha256:{tags.get(TAG_PATCH_SHA256, '(unrecorded)')}")
     print(f"held by: {patch_holder(run)}")
     print("files:")
-    for path in patch_files(download_patch(client, run)):
+    recorded = download_patch(client, run)
+    for path in patch_files(recorded):
         print(f"  {path}")
+    if patch:
+        sys.stdout.flush()
+        sys.stdout.buffer.write(recorded)
+
+
+@app.command
+def rerun(
+    run_ref: str,
+    *,
+    experiment: str | None = None,
+    tracking_uri: str | None = None,
+) -> None:
+    """Print a run's recorded invocation without executing it.
+
+    Relative directories are relative to the recorded repository's root.
+
+    Parameters
+    ----------
+    run_ref
+        An MLflow run id or a run name.
+    experiment
+        Name of the experiment to resolve a run name in.
+    tracking_uri
+        Tracking server to query, overriding the MLflow environment.
+    """
+    client = make_client(tracking_uri)
+    run = resolve_run(client, run_ref, experiment)
+    tags = run.data.tags
+    if TAG_INVOCATION_ARGV not in tags or TAG_INVOCATION_CWD not in tags:
+        print(f"run {run.info.run_id} carries no recorded invocation")
+        return
+    try:
+        argv = json.loads(tags[TAG_INVOCATION_ARGV])
+    except json.JSONDecodeError as exc:
+        raise CliError(
+            f"run {run.info.run_id} carries invalid invocation arguments: {exc}"
+        ) from exc
+    if not isinstance(argv, list) or any(not isinstance(arg, str) for arg in argv):
+        raise CliError(
+            f"run {run.info.run_id} carries invalid invocation arguments; "
+            "expected a JSON array of strings"
+        )
+    if (
+        not argv
+        or argv[0] in {"", "-", "-c"}
+        or Path(argv[0]).name == "ipykernel_launcher.py"
+    ):
+        print(f"directory: {shlex.quote(tags[TAG_INVOCATION_CWD])}")
+        print(f"argv: {json.dumps(argv)}")
+        print("note: the recorded invocation does not look like a runnable command")
+        return
+    print(f"cd {shlex.quote(tags[TAG_INVOCATION_CWD])}")
+    print(shlex.join(argv))
+
+
+@app.command
+def diff(
+    run_a: str,
+    run_b: str,
+    *,
+    experiment: str | None = None,
+    tracking_uri: str | None = None,
+    repo: Path | None = None,
+) -> None:
+    """Compare the recorded code and params of two runs, from A to B.
+
+    Parameters
+    ----------
+    run_a
+        The earlier MLflow run id or name.
+    run_b
+        The later MLflow run id or name.
+    experiment
+        Name of the experiment to resolve run names in.
+    tracking_uri
+        Tracking server to query, overriding the MLflow environment.
+    repo
+        Repository holding both commits, defaulting to the working directory's.
+    """
+    client = make_client(tracking_uri)
+    ids = (
+        _experiment_ids(client, experiment)
+        if any(not RUN_ID.match(ref) for ref in (run_a, run_b))
+        else None
+    )
+    runs = (
+        resolve_run(client, run_a, experiment, ids),
+        resolve_run(client, run_b, experiment, ids),
+    )
+    for label, run in zip(("A", "B"), runs):
+        tags = run.data.tags
+        print(f"run {label}: {run.info.run_id} ({run.info.run_name})")
+        print(f"commit:  {tags.get(TAG_COMMIT, '(unrecorded)')}")
+        print(f"dirty:   {tags.get(TAG_DIRTY, '(unrecorded)')}")
+    params_a, params_b = (run.data.params for run in runs)
+    print("params (A -> B):")
+    if params_a == params_b:
+        print("  (unchanged)")
+    for key in sorted(params_b.keys() - params_a.keys()):
+        print(f"  added: {key} = {params_b[key]!r}")
+    for key in sorted(params_a.keys() - params_b.keys()):
+        print(f"  removed: {key} = {params_a[key]!r}")
+    for key in sorted(params_a.keys() & params_b.keys()):
+        if params_a[key] != params_b[key]:
+            print(f"  changed: {key}: {params_a[key]!r} -> {params_b[key]!r}")
+    print("code (A -> B):")
+    try:
+        compared = _code_diff(client, runs, repo)
+    except (CliError, GitError, OSError) as exc:
+        print(f"Code difference unavailable: {exc}")
+    else:
+        print(compared, end="")
+
+
+def _code_diff(client: MlflowClient, runs: tuple[Run, Run], repo: Path | None) -> str:
+    """Compare reconstructed commits, removing every temporary tree and branch."""
+    states = [code_state(run) for run in runs]
+    if (
+        states[0][TAG_COMMIT] == states[1][TAG_COMMIT]
+        and states[0].get(TAG_PATCH_SHA256) == states[1].get(TAG_PATCH_SHA256)
+        and all(
+            state.get(TAG_DIRTY) == "false" or state.get(TAG_PATCH_SHA256)
+            for state in states
+        )
+    ):
+        return "Code states are identical.\n"
+
+    root = resolve_repo(repo)
+    for state in states:
+        base = state[TAG_COMMIT]
+        if not commit_exists(root, base):
+            raise CliError(
+                f"commit {base} is not present in {root}; fetch it first, for "
+                f"example with `git fetch --all`"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="runsnap-diff-") as tmp:
+        cleanup = ExitStack()
+        commits = []
+        try:
+            for label, run, state in zip(("a", "b"), runs, states):
+                patch = (
+                    download_patch(client, run)
+                    if state.get(TAG_DIRTY) == "true"
+                    else b""
+                )
+                suffix = Path(tmp).name.removeprefix("runsnap-diff-")
+                branch = f"{branch_name(run)}-diff-{suffix}-{label}"
+                if branch_exists(root, branch):
+                    raise CliError(
+                        f"temporary branch {branch!r} already exists in {root}"
+                    )
+                target = Path(tmp) / label
+                cleanup.callback(_remove_diff_tree, root, target, branch)
+                tree = _reconstruct(
+                    root,
+                    target,
+                    branch,
+                    state[TAG_COMMIT],
+                    patch,
+                    worktree=True,
+                    force=False,
+                )
+                commits.append(
+                    commit_all(tree, f"runsnap: code state of run {run.info.run_id}")
+                    if is_dirty(tree)
+                    else state[TAG_COMMIT]
+                )
+            return (
+                diff_commits(root, commits[0], commits[1]) or "No code differences.\n"
+            )
+        finally:
+            cleanup.close()
+
+
+def _remove_diff_tree(root: Path, tree: Path, branch: str) -> None:
+    """Remove even a partially created comparison tree, or just its branch."""
+    try:
+        if any(path == tree for path, _ in list_worktrees(root)):
+            remove_worktree(root, tree)
+    finally:
+        if branch_exists(root, branch):
+            delete_branch(root, branch)
 
 
 def resolve_repo(repo: Path | None) -> Path:
@@ -311,6 +543,43 @@ def _slug(name: str) -> str:
 def worktree_path(root: Path, branch: str) -> Path:
     """Where a worktree for `branch` goes when the user names no path."""
     return root.parent / f"{root.name}-{branch.replace('/', '-')}"
+
+
+@app.command
+def clean(*, remove: bool = False, repo: Path | None = None) -> None:
+    """List reconstruction worktrees and branches under `runsnap/`.
+
+    Parameters
+    ----------
+    remove
+        Remove the listed worktrees and branches, discarding uncommitted work.
+    repo
+        Repository to inspect, defaulting to the working directory's.
+    """
+    root = resolve_repo(repo)
+    try:
+        leftovers: dict[str, Path | None] = {
+            branch.removeprefix("refs/heads/"): path
+            for path, branch in list_worktrees(root)
+            if branch is not None and branch.startswith("refs/heads/runsnap/")
+        }
+        for branch in list_branches(root):
+            if branch.startswith("refs/heads/runsnap/"):
+                leftovers.setdefault(branch.removeprefix("refs/heads/"), None)
+        if not leftovers:
+            print("No runsnap worktrees or branches to remove.")
+            return
+        for branch, path in sorted(leftovers.items()):
+            if not remove:
+                print(f"{branch}  {path if path is not None else '(no worktree)'}")
+                continue
+            if path is not None:
+                remove_worktree(root, path)
+                print(f"Removed worktree: {path}", flush=True)
+            delete_branch(root, branch)
+            print(f"Removed branch: {branch}", flush=True)
+    except GitError as exc:
+        raise CliError(str(exc)) from exc
 
 
 @app.command

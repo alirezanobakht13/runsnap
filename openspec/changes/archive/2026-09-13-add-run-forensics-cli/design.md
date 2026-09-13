@@ -62,6 +62,17 @@ This reads the flattened params rather than the `hparams/*.json` artifact,
 because params are what both runs are guaranteed to have — the artifact exists
 only when `log_params()` was used.
 
+### Patch capture preserves the copied index's timestamps
+
+The existing capture requirement includes every uncommitted change. Git uses
+the index's modification time to decide when matching file stat data still
+needs a content check. Copying the index with `shutil.copyfile()` replaces that
+timestamp, which can cause a same-size edit with unchanged file timestamps to
+be omitted from the patch. Use `shutil.copy2()` to preserve it while keeping all
+index writes confined to the copy. A deterministic regression models matching
+timestamps, verifies that the patch reconstructs the edit, and checks that the
+original index, working tree, and `HEAD` are unchanged.
+
 ### The invocation is two tags, recorded inside `capture()`
 
 `runsnap.invocation.argv` holds `sys.argv` as a JSON array — a list, not a

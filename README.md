@@ -15,6 +15,9 @@ Tags are `runsnap.git.` + `commit`, `branch`, `dirty`, `repo_url`,
 `patch_sha256`, `patch_run_id` (nested runs point at the ancestor holding the
 patch), `capture_error`; the patch is artifact `code/state.patch` on dirty runs.
 Equal `commit` and `patch_sha256` mean identical code.
+Capture also records `sys.argv` as a JSON array in `runsnap.invocation.argv`
+and the working directory in `runsnap.invocation.cwd`, relative to the
+repository root when inside it and absolute otherwise.
 
 ```bash
 runsnap show <run-id-or-name>      # commit, branch, dirty, digest, files
@@ -28,8 +31,51 @@ patch with `RUNSNAP_MAX_PATCH_BYTES` (10 MiB). A patch reaching the cap is
 abandoned there, leaving the run marked dirty with a `capture_error` naming the
 cap, no patch artifact, and no `patch_sha256`.
 
-**The patch carries uncommitted content of tracked files, so a secret in one is
-uploaded to the tracking server.** Ignored files are excluded.
+**The patch carries uncommitted content of tracked files, and the recorded
+argument vector carries command-line arguments. Secrets in either are uploaded
+to the tracking server.** Ignored files are excluded from the patch. Both code
+and invocation capture are disabled by `capture_code=False` or
+`RUNSNAP_CAPTURE_CODE=0`.
+
+## Run forensics
+
+Commands taking runs accept run ids or names. Use `--experiment NAME` to narrow
+name resolution and `--tracking-uri URI` to override `MLFLOW_TRACKING_URI`.
+
+```bash
+runsnap diff baseline tuned                # code and param changes, baseline -> tuned
+runsnap rerun baseline                     # print the recorded directory and argv
+runsnap patch baseline                     # raw patch bytes on stdout
+runsnap patch baseline --output run.patch  # write the patch to a file instead
+runsnap show baseline --patch              # code-state report followed by the patch
+runsnap clean                              # list reconstruction worktrees and branches
+runsnap clean --remove                     # delete those worktrees and branches
+```
+
+`diff` reports both commits and dirty states, added/removed/changed params, and
+the difference between the recorded code states, including uncommitted work.
+The code comparison needs a local repository holding both commits; pass
+`--repo PATH` to select one. Temporary worktrees and branches are removed after
+the comparison, including on failure. Identical commits and patch digests skip
+reconstruction. If a commit is missing or a patch cannot be applied, the output
+explains why the code comparison is unavailable and still reports metadata and
+params.
+
+`rerun` prints the recorded directory and shell-quoted argument vector without
+executing anything. Relative directories start at the reconstructed repository
+root. It reports missing invocation tags on older runs and flags notebook or
+REPL argument vectors that do not look like runnable commands.
+
+`patch` exports the recorded bytes unchanged, including binary hunks, and needs
+no local repository. A clean run reports that it has no patch and writes no
+patch output. `show --patch` appends the same bytes after its usual report.
+
+`clean` lists worktree paths and branches under `runsnap/`, including branches
+left after their worktree directories were deleted. Use `--repo PATH` to select
+the repository. Listing removes nothing; **`--remove` discards uncommitted work
+in the listed worktrees** and reports each removal. Worktrees and branches
+outside that prefix are untouched. With no leftovers, it reports that there is
+nothing to remove.
 
 ## Run lifecycle
 

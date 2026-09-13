@@ -19,6 +19,8 @@ that nobody remembers creating.
 - Capture records the command that started the run — its argument vector and its
   working directory relative to the repository root — as `runsnap.invocation.*`
   tags.
+- Patch capture preserves the copied Git index's timestamps so same-size edits
+  with unchanged file timestamps remain visible to Git's content checks.
 - `runsnap rerun <run>` prints that recorded invocation, ready to copy. It never
   executes anything.
 - `runsnap patch <run>` writes a run's recorded patch to standard output or to a

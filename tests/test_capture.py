@@ -1,6 +1,8 @@
 """Tests for code state capture onto real MLflow runs."""
 
+import json
 import subprocess
+import sys
 from pathlib import Path
 
 import mlflow
@@ -19,6 +21,8 @@ from runsnap._tags import (
     TAG_CAPTURE_ERROR,
     TAG_COMMIT,
     TAG_DIRTY,
+    TAG_INVOCATION_ARGV,
+    TAG_INVOCATION_CWD,
     TAG_PATCH_RUN_ID,
     TAG_PATCH_SHA256,
     TAG_REPO_URL,
@@ -73,6 +77,73 @@ def test_clean_tree_records_no_patch(in_repo: GitRepo, tracking):
     assert recorded[TAG_DIRTY] == "false"
     assert TAG_PATCH_SHA256 not in recorded
     assert artifact_paths(tracking, run_id) == set()
+
+
+@pytest.mark.parametrize("directory", [".", "experiments/nested"])
+def test_invocation_records_arguments_and_relative_directory(
+    in_repo: GitRepo, tracking, monkeypatch: pytest.MonkeyPatch, directory: str
+):
+    cwd = in_repo.path / directory
+    cwd.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(cwd)
+    argv = ["train.py", "--name", "two words", "$(echo value);", "", "café"]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with runsnap.start_run() as run:
+        run_id = run.info.run_id
+
+    recorded = tags(tracking, run_id)
+    assert json.loads(recorded[TAG_INVOCATION_ARGV]) == argv
+    assert recorded[TAG_INVOCATION_CWD] == directory
+    assert recorded[TAG_COMMIT] == in_repo.git("rev-parse", "HEAD").strip()
+
+
+def test_invocation_records_absolute_directory_outside_repository(
+    in_repo: GitRepo, tracking, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    outside = tmp_path / "repo-other"
+    outside.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(in_repo.path / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(in_repo.path))
+    monkeypatch.chdir(outside)
+    argv = [str(in_repo.path / "main.py"), "--steps", "10"]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with runsnap.start_run() as run:
+        run_id = run.info.run_id
+
+    recorded = tags(tracking, run_id)
+    assert json.loads(recorded[TAG_INVOCATION_ARGV]) == argv
+    assert recorded[TAG_INVOCATION_CWD] == str(outside)
+    assert recorded[TAG_COMMIT] == in_repo.git("rev-parse", "HEAD").strip()
+
+
+@pytest.mark.parametrize("refused_tag", [TAG_INVOCATION_ARGV, TAG_INVOCATION_CWD])
+def test_refused_invocation_warns_and_leaves_run_usable(
+    in_repo: GitRepo, tracking, monkeypatch: pytest.MonkeyPatch, refused_tag: str
+):
+    set_tag = tracking.set_tag
+
+    def refusing_set_tag(run_id: str, key: str, value):
+        if key == refused_tag:
+            raise RuntimeError("invocation rejected")
+        return set_tag(run_id, key, value)
+
+    monkeypatch.setattr(tracking, "set_tag", refusing_set_tag)
+    monkeypatch.setattr(_capture, "MlflowClient", lambda: tracking)
+
+    with pytest.warns(UserWarning, match="invocation rejected"):
+        run = runsnap.start_run()
+    with run:
+        run_id = run.info.run_id
+        mlflow.log_metric("score", 1.0)
+
+    finished = tracking.get_run(run_id)
+    assert finished.info.status == "FINISHED"
+    assert finished.data.metrics["score"] == 1.0
+    assert finished.data.tags[TAG_CAPTURE_ERROR] == "invocation rejected"
+    assert refused_tag not in finished.data.tags
+    assert TAG_COMMIT in finished.data.tags
 
 
 def test_identical_trees_share_a_digest(in_repo: GitRepo, tracking):

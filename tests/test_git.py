@@ -15,8 +15,10 @@ from runsnap._git import (
     build_patch,
     checkout_new_branch,
     current_branch,
+    diff_commits,
     find_repo_root,
     head_commit,
+    list_worktrees,
     patch_files,
     read_state,
     remote_url,
@@ -110,6 +112,37 @@ def test_build_patch_leaves_git_status_untouched(repo: GitRepo) -> None:
     build_patch(repo.path, ROOMY)
 
     assert repo.status() == before
+
+
+def test_patch_captures_same_size_edit_with_unchanged_timestamp(
+    repo: GitRepo, tmp_path: Path
+) -> None:
+    # Model a filesystem where an edit shares the cached file's stat data.
+    repo.git("config", "core.trustctime", "false")
+    repo.git("config", "core.checkstat", "minimal")
+    source = repo.write("main.py", "print('A')\n")
+    timestamp = 1_700_000_000
+    os.utime(source, (timestamp, timestamp))
+    base = repo.commit("base")
+    index = repo.path / ".git" / "index"
+    # Git must treat the file as potentially changed when its timestamp
+    # matches the index's, even though its stat data looks unchanged.
+    os.utime(index, (timestamp, timestamp))
+    repo.write("main.py", "print('B')\n")
+    os.utime(source, (timestamp, timestamp))
+    original_index = index.read_bytes()
+    original_mtime = index.stat().st_mtime_ns
+
+    patch = build_patch(repo.path, ROOMY)
+
+    assert b"-print('A')\n+print('B')" in patch
+    assert index.read_bytes() == original_index
+    assert index.stat().st_mtime_ns == original_mtime
+    assert source.read_text() == "print('B')\n"
+    assert head_commit(repo.path) == base
+    clone = repo.clone_at(base, tmp_path / "clone")
+    apply_patch(clone, patch)
+    assert (clone / "main.py").read_text() == "print('B')\n"
 
 
 def test_patch_round_trip_reproduces_the_working_tree(
@@ -332,6 +365,37 @@ def test_worktree_reconstructs_the_recorded_state(
     apply_patch(tree, patch)
 
     assert snapshot(tree) == expected
+
+
+@pytest.mark.parametrize("detached", [False, True])
+def test_list_worktrees_reports_paths_and_full_branch_refs(
+    in_repo: GitRepo, tmp_path: Path, detached: bool
+) -> None:
+    tree = tmp_path / 'worktree with spaces and "quotes" café'
+    if detached:
+        in_repo.git("worktree", "add", "--detach", str(tree), "HEAD")
+    else:
+        add_worktree(in_repo.path, tree, "runsnap/restored", head_commit(in_repo.path))
+
+    assert list_worktrees(in_repo.path) == [
+        (in_repo.path, "refs/heads/main"),
+        (tree, None if detached else "refs/heads/runsnap/restored"),
+    ]
+
+
+def test_diff_commits_detects_a_rename(in_repo: GitRepo) -> None:
+    before = head_commit(in_repo.path)
+    (in_repo.path / "main.py").rename(in_repo.path / "renamed.py")
+    after = in_repo.commit("rename script")
+    in_repo.git("config", "diff.renames", "false")
+
+    compared = diff_commits(in_repo.path, before, after)
+
+    assert (
+        "similarity index 100%\nrename from main.py\nrename to renamed.py\n" in compared
+    )
+    assert "deleted file mode" not in compared
+    assert "new file mode" not in compared
 
 
 def test_in_place_checkout_reconstructs_the_recorded_state(

@@ -1,7 +1,11 @@
 """Tests for the `runsnap` command line application."""
 
+import io
+import json
+import shlex
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import mlflow
 import pytest
@@ -17,7 +21,15 @@ from runsnap._cli import (
     resolve_run,
     show,
 )
-from runsnap._tags import TAG_COMMIT, TAG_PATCH_RUN_ID, TAG_PATCH_SHA256
+from runsnap._tags import (
+    PATCH_ARTIFACT_PATH,
+    TAG_COMMIT,
+    TAG_DIRTY,
+    TAG_INVOCATION_ARGV,
+    TAG_INVOCATION_CWD,
+    TAG_PATCH_RUN_ID,
+    TAG_PATCH_SHA256,
+)
 
 
 def test_run_id_reference_is_looked_up_directly(tracking) -> None:
@@ -107,6 +119,228 @@ def dirty_run(repo: GitRepo) -> str:
         return active.info.run_id
 
 
+def test_rerun_prints_shell_quoted_invocation_without_executing(
+    in_repo: GitRepo, tracking, tmp_path, capsys, monkeypatch
+) -> None:
+    directory = "experiments/one 'quoted'; trial"
+    cwd = in_repo.path / directory
+    cwd.mkdir(parents=True)
+    argv = [
+        "train.py",
+        "--label",
+        "two words",
+        "--literal",
+        "$(touch marker); $HOME & 'quotes'",
+        "",
+    ]
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(sys, "argv", argv)
+    with runsnap.start_run(run_name="quoted-invocation"):
+        pass
+
+    monkeypatch.chdir(tmp_path)
+    popen = Mock(side_effect=AssertionError("rerun must not start a process"))
+    monkeypatch.setattr(_cli.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "runsnap",
+            "rerun",
+            "quoted-invocation",
+            "--experiment",
+            "runsnap-tests",
+            "--tracking-uri",
+            mlflow.get_tracking_uri(),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 0
+    directory_line, command_line = capsys.readouterr().out.splitlines()
+    assert shlex.split(directory_line) == ["cd", directory]
+    assert shlex.split(command_line) == argv
+    assert Path.cwd() == tmp_path
+    popen.assert_not_called()
+
+
+def test_rerun_reports_a_run_captured_before_invocation_tags(
+    in_repo: GitRepo, tracking, capsys, monkeypatch
+) -> None:
+    with mlflow.start_run(
+        tags={TAG_COMMIT: _git.head_commit(in_repo.path), TAG_DIRTY: "false"}
+    ) as active:
+        run_id = active.info.run_id
+    monkeypatch.setattr(sys, "argv", ["runsnap", "rerun", run_id])
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 0
+    assert capsys.readouterr().out == f"run {run_id} carries no recorded invocation\n"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [
+            "/venv/lib/python3.12/site-packages/ipykernel_launcher.py",
+            "-f",
+            "kernel.json",
+        ],
+        [""],
+        [],
+        ["-"],
+        ["-c", "argument"],
+    ],
+)
+def test_rerun_reports_non_runnable_invocation_without_executing(
+    argv, tracking, tmp_path, capsys, monkeypatch
+) -> None:
+    with mlflow.start_run(
+        tags={TAG_INVOCATION_ARGV: json.dumps(argv), TAG_INVOCATION_CWD: "."}
+    ) as active:
+        run_id = active.info.run_id
+    monkeypatch.chdir(tmp_path)
+    popen = Mock(side_effect=AssertionError("rerun must not start a process"))
+    monkeypatch.setattr(_cli.subprocess, "Popen", popen)
+    monkeypatch.setattr(sys, "argv", ["runsnap", "rerun", run_id])
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 0
+    assert capsys.readouterr().out == (
+        f"directory: .\nargv: {json.dumps(argv)}\n"
+        "note: the recorded invocation does not look like a runnable command\n"
+    )
+    assert Path.cwd() == tmp_path
+    popen.assert_not_called()
+
+
+@pytest.mark.parametrize("recorded", ['["unfinished"', '"train.py"', '["train.py", 1]'])
+def test_rerun_reports_invalid_invocation_arguments(
+    recorded, tracking, capsys, monkeypatch
+) -> None:
+    with mlflow.start_run(
+        tags={TAG_INVOCATION_ARGV: recorded, TAG_INVOCATION_CWD: "."}
+    ) as active:
+        run_id = active.info.run_id
+    monkeypatch.setattr(sys, "argv", ["runsnap", "rerun", run_id])
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"run {run_id} carries invalid invocation arguments" in captured.err
+
+
+@pytest.mark.parametrize("to_file", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_patch_exports_recorded_bytes(
+    to_file, nested, in_repo: GitRepo, tracking, tmp_path, capsysbinary, monkeypatch
+) -> None:
+    in_repo.write("main.py", b"# non-UTF-8: \xff\r\nprint('changed')\r\n")
+    in_repo.write("weights.bin", b"\x00\x01\x02\xff")
+    with runsnap.start_run(run_name="patch-source") as parent:
+        holder_id = parent.info.run_id
+        if nested:
+            with runsnap.start_run(nested=True, run_name="patch-child") as child:
+                run_id = child.info.run_id
+        else:
+            run_id = holder_id
+    run = tracking.get_run(run_id)
+    if nested:
+        assert run.data.tags[TAG_PATCH_RUN_ID] == holder_id
+    recorded = Path(
+        tracking.download_artifacts(holder_id, PATCH_ARTIFACT_PATH)
+    ).read_bytes()
+    assert b"GIT binary patch" in recorded
+    assert b"\xff\r\n" in recorded
+    output = tmp_path / "exported.patch"
+    args = [
+        "runsnap",
+        "patch",
+        run.info.run_name,
+        "--experiment",
+        "runsnap-tests",
+        "--tracking-uri",
+        mlflow.get_tracking_uri(),
+    ]
+    if to_file:
+        output.write_bytes(b"old content" * len(recorded))
+        args.extend(["--output", str(output)])
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(_git.GitError):
+        _git.find_repo_root()
+    popen = Mock(side_effect=AssertionError("patch must not start a git process"))
+    monkeypatch.setattr(_cli.subprocess, "Popen", popen)
+    monkeypatch.setattr(sys, "argv", args)
+    capsysbinary.readouterr()
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 0
+    printed = capsysbinary.readouterr().out
+    if to_file:
+        assert printed == b""
+        assert output.read_bytes() == recorded
+    else:
+        assert printed == recorded
+        assert not output.exists()
+    popen.assert_not_called()
+
+
+def test_patch_reports_an_unwritable_destination(
+    in_repo: GitRepo, tracking, tmp_path, capsys, monkeypatch
+) -> None:
+    run_id = dirty_run(in_repo)
+    monkeypatch.setattr(
+        sys, "argv", ["runsnap", "patch", run_id, "--output", str(tmp_path)]
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 1
+    printed = capsys.readouterr()
+    assert printed.out == ""
+    assert f"could not write patch to {tmp_path}" in printed.err
+
+
+@pytest.mark.parametrize("destination", ["stdout", "new", "existing"])
+def test_patch_on_a_clean_run_reports_no_patch_and_writes_nothing(
+    destination, in_repo: GitRepo, tracking, tmp_path, capsysbinary, monkeypatch
+) -> None:
+    with runsnap.start_run() as active:
+        run_id = active.info.run_id
+    output = tmp_path / "exported.patch"
+    if destination == "existing":
+        output.write_bytes(b"keep this content")
+    args = ["runsnap", "patch", run_id]
+    if destination != "stdout":
+        args.extend(["--output", str(output)])
+    monkeypatch.setattr(sys, "argv", args)
+    capsysbinary.readouterr()
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 0
+    printed = capsysbinary.readouterr()
+    assert printed.out == b""
+    assert printed.err == f"run {run_id} has no patch (clean tree)\n".encode()
+    if destination == "existing":
+        assert output.read_bytes() == b"keep this content"
+    else:
+        assert not output.exists()
+
+
 def test_show_prints_the_recorded_code_state(
     in_repo: GitRepo, tracking, capsys
 ) -> None:
@@ -139,13 +373,41 @@ def test_show_lists_a_binary_file_added_to_the_tree(
     assert "  weights.bin" in capsys.readouterr().out
 
 
+def test_show_patch_flushes_the_report_before_the_recorded_bytes(
+    in_repo: GitRepo, tracking, capsysbinary, monkeypatch
+) -> None:
+    in_repo.write("main.py", b"# non-UTF-8: \xff\r\nprint('changed')\r\n")
+    in_repo.write("weights.bin", b"\x00\x01\x02\xff")
+    with runsnap.start_run() as active:
+        run_id = active.info.run_id
+    recorded = Path(
+        tracking.download_artifacts(run_id, PATCH_ARTIFACT_PATH)
+    ).read_bytes()
+    capsysbinary.readouterr()
+    show(run_id)
+    report = capsysbinary.readouterr().out
+    assert b"GIT binary patch" in recorded
+    assert b"\xff\r\n" in recorded
+    monkeypatch.setattr(sys, "argv", ["runsnap", "show", run_id, "--patch"])
+
+    with io.TextIOWrapper(io.BytesIO(), encoding="utf-8") as stdout:
+        with monkeypatch.context() as patched:
+            patched.setattr(sys, "stdout", stdout)
+            with pytest.raises(SystemExit) as raised:
+                main()
+
+        assert raised.value.code == 0
+        assert stdout.buffer.getvalue() == report + recorded
+
+
+@pytest.mark.parametrize("with_patch", [False, True])
 def test_show_on_a_clean_run_reports_no_patch(
-    in_repo: GitRepo, tracking, capsys
+    with_patch, in_repo: GitRepo, tracking, capsys
 ) -> None:
     with runsnap.start_run() as active:
         run_id = active.info.run_id
 
-    show(run_id)
+    show(run_id, patch=with_patch)
 
     printed = capsys.readouterr().out
     assert "dirty:   false" in printed

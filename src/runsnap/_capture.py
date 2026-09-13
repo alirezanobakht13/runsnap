@@ -1,7 +1,9 @@
 """Orchestration of what a run's code state records."""
 
 import hashlib
+import json
 import os
+import sys
 import tempfile
 import warnings
 from dataclasses import dataclass
@@ -32,6 +34,8 @@ from runsnap._tags import (
     TAG_CAPTURE_ERROR,
     TAG_COMMIT,
     TAG_DIRTY,
+    TAG_INVOCATION_ARGV,
+    TAG_INVOCATION_CWD,
     TAG_PATCH_RUN_ID,
     TAG_PATCH_SHA256,
     TAG_REPO_URL,
@@ -97,7 +101,7 @@ _patch_holders: dict[str, tuple[str, str]] = {}
 
 
 def capture(run: Run) -> None:
-    """Record the code state of the working tree onto `run`.
+    """Record the code state and process invocation onto `run`.
 
     Every failure is reported as a warning and, where a run exists to carry it,
     as an `runsnap.git.capture_error` tag. Nothing raises into user code.
@@ -105,12 +109,17 @@ def capture(run: Run) -> None:
     client = MlflowClient()
     run_id = run.info.run_id
     try:
-        resolve_repo_root()
+        root = resolve_repo_root()
     except GitError as exc:
         warnings.warn(f"runsnap captured no code state: {exc}", stacklevel=3)
         return
     try:
         _capture_state(client, run)
+        cwd = Path.cwd()
+        if cwd.is_relative_to(root):
+            cwd = cwd.relative_to(root)
+        client.set_tag(run_id, TAG_INVOCATION_ARGV, json.dumps(sys.argv))
+        client.set_tag(run_id, TAG_INVOCATION_CWD, str(cwd))
     except Exception as exc:  # noqa: BLE001 - capture must never fail the run
         warnings.warn(f"runsnap could not capture code state: {exc}", stacklevel=3)
         _record_error(client, run_id, str(exc))

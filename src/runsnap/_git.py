@@ -199,7 +199,9 @@ def build_patch(root: Path | str, max_bytes: int) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         index_copy = Path(tmp) / "index"
         if index.exists():
-            shutil.copyfile(index, index_copy)
+            # Preserve mtime so Git still checks potentially changed files
+            # whose cached stat data matches the index's timestamp.
+            shutil.copy2(index, index_copy)
         env = {**os.environ, "GIT_INDEX_FILE": str(index_copy)}
         _git(["add", "-A", "-N", "--", "."], root, env=env)
         return _git_capped(
@@ -278,6 +280,46 @@ def add_worktree(root: Path | str, path: Path | str, branch: str, commit: str) -
     """Create a worktree at `path` on a new `branch` starting at `commit`."""
     _git(["worktree", "add", "-b", branch, str(path), commit], root)
     return Path(path)
+
+
+def list_worktrees(root: Path | str) -> list[tuple[Path, str | None]]:
+    """Registered worktree paths and full branch refs (`None` for detached HEADs)."""
+    worktrees = []
+    for record in _git(["worktree", "list", "--porcelain"], root).split(b"\n\n"):
+        path = None
+        branch = None
+        for field in record.split(b"\n"):
+            if field.startswith(b"worktree "):
+                path = Path(unquote_path(field.removeprefix(b"worktree ")))
+            elif field.startswith(b"branch "):
+                branch = os.fsdecode(field.removeprefix(b"branch "))
+        if path is not None:
+            worktrees.append((path, branch))
+    return worktrees
+
+
+def list_branches(root: Path | str) -> list[str]:
+    """Full refs of the repository's local branches."""
+    return os.fsdecode(
+        _git(["for-each-ref", "--format=%(refname)", "refs/heads/"], root)
+    ).splitlines()
+
+
+def diff_commits(root: Path | str, commit_a: str, commit_b: str) -> str:
+    """The textual difference from A to B, detecting renames and binary changes."""
+    return _git(
+        [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--find-renames",
+            commit_a,
+            commit_b,
+            "--",
+        ],
+        root,
+    ).decode(errors="replace")
 
 
 def checkout_new_branch(
