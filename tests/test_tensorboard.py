@@ -2,12 +2,15 @@
 
 import socket
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pytest
 from mlflow.tracking import MlflowClient
+from pydantic import BaseModel
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+from tensorboard.plugins.hparams import metadata
 from tensorboardX.writer import FileWriter
 
 import runsnap
@@ -21,6 +24,7 @@ from runsnap._tags import (
     TB_TAG_LOGDIR,
     tb_light_suffix,
 )
+from runsnap._tb_fetch import fetch_run
 from runsnap._tensorboard import TensorBoardWriter, _Sync
 
 
@@ -609,3 +613,160 @@ def test_no_active_run_raises_a_named_error(tracking):
         runsnap.tensorboard(),
     ):
         pass
+
+
+class Optimizer(BaseModel):
+    lr: float = 0.001
+
+
+class Config(BaseModel):
+    seed: int = 42
+    opt: Optimizer = Optimizer()
+
+
+class Metadata(BaseModel):
+    commit: str = "abc123"
+
+
+def uploaded_session(
+    client, run_id: str, tmp_path: Path
+) -> dict[str, bool | float | str] | None:
+    """The session TensorBoard reads from a run's uploaded root scalar files.
+
+    Only the scalar files are fetched, as `runsnap tb` fetches them without
+    `--media`, and only the root of the log directory is read, so a session
+    written anywhere else is not found. None when the files hold no session.
+    """
+    light_dir = fetch_run(client, run_id, cache_dir=tmp_path / "cache")
+    try:
+        content = accumulate(light_dir).PluginTagToContent(metadata.PLUGIN_NAME)
+    except KeyError:
+        return None
+    assert metadata.EXPERIMENT_TAG not in content
+    if metadata.SESSION_START_INFO_TAG not in content:
+        return None
+    info = metadata.parse_session_start_info_plugin_data(
+        content[metadata.SESSION_START_INFO_TAG]
+    )
+    return {
+        key: getattr(value, value.WhichOneof("kind"))
+        for key, value in info.hparams.items()
+    }
+
+
+def test_session_holds_every_model_logged_before_the_writer(tracking, tmp_path):
+    with runsnap.start_run(capture_code=False) as run:
+        runsnap.log_params(Config())
+        runsnap.log_params(Metadata(), name="metadata", prefix="metadata")
+        with runsnap.tensorboard(sync_interval=60.0) as writer:
+            writer.add_record("evaluation", {"mean_return": 3.0}, 10)
+        session = uploaded_session(tracking, run.info.run_id, tmp_path)
+
+    assert session == {"seed": 42, "opt.lr": 0.001, "metadata.commit": "abc123"}
+
+
+def test_run_without_params_has_no_session(tracking, tmp_path):
+    with runsnap.start_run(capture_code=False) as run:
+        with runsnap.tensorboard(sync_interval=60.0) as writer:
+            writer.add_scalar("train/loss", 0.5, 1)
+        assert uploaded_session(tracking, run.info.run_id, tmp_path) is None
+
+
+def test_failing_session_write_warns_and_still_yields_a_writer(tracking, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise ValueError("session refused")
+
+    def logging_with_refused_session():
+        with runsnap.tensorboard(sync_interval=60.0, flush_secs=0.05) as writer:
+            writer.add_scalar("train/loss", 0.5, 1)
+            assert wait_for_scalar(Path(writer.logdir), "train/loss", 10.0) == [1]
+
+    monkeypatch.setattr("runsnap._tensorboard.hparams", refuse)
+    with runsnap.start_run(capture_code=False):
+        runsnap.log_params(Config())
+        with pytest.warns(UserWarning, match="session refused"):
+            logging_with_refused_session()
+
+
+def test_session_values_keep_their_types(tracking, tmp_path):
+    class Typed(BaseModel):
+        name: str = "resnet"
+        lr: float = 0.001
+        epochs: int = 10
+        use_amp: bool = True
+        layers: list[int] = [64, 128]
+        overrides: dict[str, int] = {}
+        target_kl: float | None = None
+
+    with runsnap.start_run(capture_code=False) as run:
+        runsnap.log_params(Typed())
+        with runsnap.tensorboard(sync_interval=60.0):
+            pass
+        session = uploaded_session(tracking, run.info.run_id, tmp_path)
+
+    assert session == {
+        "name": "resnet",
+        "lr": 0.001,
+        "epochs": 10,
+        "use_amp": True,
+        "layers": "[64, 128]",
+        "overrides": "{}",
+    }
+    # Equality alone would let `True` pass for `1.0`, so the kinds are checked.
+    assert {key: type(value) for key, value in session.items()} == {
+        "name": str,
+        "lr": float,
+        "epochs": float,
+        "use_amp": bool,
+        "layers": str,
+        "overrides": str,
+    }
+
+
+class Derived(BaseModel):
+    horizon: int = 128
+
+
+def test_model_logged_inside_the_writer_warns_and_misses_the_session(
+    tracking, tmp_path
+):
+    with runsnap.start_run(capture_code=False) as run:
+        run_id = run.info.run_id
+        runsnap.log_params(Config())
+        with (
+            runsnap.tensorboard(sync_interval=60.0),
+            pytest.warns(UserWarning, match="missing from the run's TensorBoard"),
+        ):
+            runsnap.log_params(Derived(), name="derived", prefix="derived")
+        session = uploaded_session(tracking, run_id, tmp_path)
+
+    assert tracking.get_run(run_id).data.params["derived.horizon"] == "128"
+    hparams_files = [info.path for info in tracking.list_artifacts(run_id, "hparams")]
+    assert "hparams/derived.json" in hparams_files
+    assert session is not None
+    assert set(session) == {"seed", "opt.lr"}
+
+
+def test_models_logged_before_the_writer_do_not_warn(tracking):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with runsnap.start_run(capture_code=False):
+            runsnap.log_params(Config())
+            runsnap.log_params(Metadata(), name="metadata", prefix="metadata")
+            with runsnap.tensorboard(sync_interval=60.0):
+                pass
+
+    assert [w for w in caught if "hyperparameters" in str(w.message)] == []
+
+
+def test_session_is_uploaded_while_the_writer_is_open(tracking, tmp_path):
+    with runsnap.start_run(capture_code=False) as run:
+        runsnap.log_params(Config())
+        with runsnap.tensorboard(sync_interval=0.05):
+            deadline = time.monotonic() + 20.0
+            while (
+                session := uploaded_session(tracking, run.info.run_id, tmp_path)
+            ) is None:
+                assert time.monotonic() < deadline, "the session was never uploaded"
+                time.sleep(0.05)
+            assert set(session) == {"seed", "opt.lr"}

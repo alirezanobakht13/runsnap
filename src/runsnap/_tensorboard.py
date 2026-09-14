@@ -14,8 +14,10 @@ from typing import Any
 import mlflow
 from mlflow.tracking import MlflowClient
 from tensorboardX import SummaryWriter
+from tensorboardX.summary import hparams
 
 from runsnap._metrics import flatten_metrics
+from runsnap._params import SessionValue, claim_session
 from runsnap._tags import (
     TB_ARTIFACT_DIR,
     TB_FLUSH_SECONDS,
@@ -168,6 +170,18 @@ class TensorBoardWriter:
         return self._call_media(
             "add_histogram", tag, values, global_step, bins, **kwargs
         )
+
+    def _write_session(self, values: dict[str, SessionValue]) -> None:
+        """Write a run's HParams session start into the scalar stream.
+
+        The session lands in the run's own directory, in a scalar file, so a
+        view without media shows it. Only the session start is written: an
+        experiment summary would impose this run's columns on every run in a
+        view, and the run's scalar tags already serve as the session's metrics.
+        """
+        _, session_start, _ = hparams(values, {})
+        with self._lock:
+            self._light.writer._get_file_writer().add_summary(session_start)
 
     def flush(self) -> None:
         """Push both streams' pending events to disk."""
@@ -330,6 +344,10 @@ def tensorboard(
     open, uploads everything outstanding, and closes the writer, whether the
     block ended normally, by an exception, or by `KeyboardInterrupt`.
 
+    Every model logged to the run through `runsnap.log_params()` in this
+    process is written as the run's HParams session before the writer is
+    handed over; params logged after entry miss it, and `log_params()` warns.
+
     `run_id` defaults to the active MLflow run. Extra keyword arguments go to
     the underlying summary writers, which flush to disk every
     `TB_FLUSH_SECONDS` unless the caller passes its own `flush_secs`.
@@ -344,6 +362,10 @@ def tensorboard(
         light_shard_max_bytes=light_shard_max_bytes,
         **kwargs,
     )
+    session = claim_session(resolved)
+    if session:
+        with _warn_instead_of_raising("write the run's TensorBoard hyperparameters"):
+            writer._write_session(session)
     sync = _Sync(client, resolved, writer, interval=sync_interval)
     with _warn_instead_of_raising("tag the run with its TensorBoard location"):
         client.set_tag(resolved, TB_TAG_LOGDIR, TB_ARTIFACT_DIR)

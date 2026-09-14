@@ -135,6 +135,20 @@ one-element array, list, or tuple charts as its element and an empty one is
 dropped; a field holding more than one number, whether an array or a list,
 raises, naming the field.
 
+Every model passed to `runsnap.log_params()` on the run, in the same process,
+before entering `runsnap.tensorboard()`, appears in TensorBoard's HParams tab
+keyed like its MLflow params (`opt.lr`, prefix included). The session is written
+on entry into the run's scalar file, so `runsnap tb` shows it without `--media`
+and the first sync pass uploads it. Booleans, numbers, and strings keep their
+type; sequences and empty containers show their param's JSON text; `None` is
+left out, so a column numeric in some runs stays numeric. Runs with different
+keys share one table under the union of their keys, each run's scalar tags
+serving as metric columns at their latest values. Params logged inside the
+block still reach MLflow but miss the session, and `log_params()` warns; a
+second writer block on the run writes a session TensorBoard ignores. Params
+logged from another process are not included, a run with no params gets no
+session, and a failed write only warns.
+
 Use the same `MLFLOW_TRACKING_URI` for logging and viewing (or pass
 `--tracking-uri` to the CLI):
 

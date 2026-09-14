@@ -35,24 +35,61 @@ def flatten_model(model: BaseModel, prefix: str = "") -> dict[str, str]:
     too so the field does not silently vanish. A model with no fields has no
     leaves and yields no params, with or without a prefix.
     """
+    return {key: _encode(value) for key, value in _leaves(model, prefix).items()}
+
+
+def _leaves(model: BaseModel, prefix: str) -> dict[str, Any]:
+    """Every leaf of a model under its dotted key, holding its JSON value."""
     return _flatten_fields(model.model_dump(mode="json"), prefix)
 
 
-def _flatten_fields(fields: Mapping[str, Any], prefix: str) -> dict[str, str]:
-    flat: dict[str, str] = {}
+def _flatten_fields(fields: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+    flat: dict[str, Any] = {}
     for key, value in fields.items():
         flat.update(_flatten(value, f"{prefix}.{key}" if prefix else str(key)))
     return flat
 
 
-def _flatten(value: Any, prefix: str) -> dict[str, str]:
+def _flatten(value: Any, prefix: str) -> dict[str, Any]:
     if isinstance(value, Mapping) and value:
         return _flatten_fields(value, prefix)
-    return {prefix: _encode(value)}
+    return {prefix: value}
 
 
 def _encode(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value)
+
+
+type SessionValue = bool | int | float | str
+
+_sessions: dict[str, dict[str, SessionValue]] = {}
+"""Each run's TensorBoard session values, as logged in this process."""
+
+_claimed: set[str] = set()
+"""Runs whose TensorBoard session has been taken by a writer in this process."""
+
+
+def claim_session(run_id: str) -> dict[str, SessionValue]:
+    """The session values logged to a run, marking the run as claimed.
+
+    The run counts as claimed whether or not anything was logged to it, so a
+    later `log_params()` on the run warns that its values miss the session.
+    """
+    _claimed.add(run_id)
+    return dict(_sessions.get(run_id, {}))
+
+
+def _session_values(leaves: Mapping[str, Any]) -> dict[str, SessionValue]:
+    """A run's TensorBoard session values from its leaves.
+
+    Booleans, numbers and strings are kept as they are, `None` is left out, and
+    the rest become the JSON text of their MLflow param.
+    """
+    return {
+        key: value if isinstance(value, bool | int | float | str) else _encode(value)
+        for key, value in leaves.items()
+        if value is not None
+    }
 
 
 def log_params(
@@ -73,6 +110,10 @@ def log_params(
     Params go to the tracking server in batches, so a model of any size costs
     one request per hundred leaves rather than one per leaf.
 
+    The leaves are also recorded in this process as the run's TensorBoard
+    session values; params logged after `runsnap.tensorboard()` was entered
+    for the run miss its session and warn.
+
     Logs to the active run unless `run_id` names another one.
     """
     if not isinstance(model, BaseModel):
@@ -82,8 +123,10 @@ def log_params(
         )
     client = MlflowClient()
     target = _resolve_run_id(run_id)
+    leaves = _leaves(model, prefix)
     params: list[Param] = []
-    for key, value in flatten_model(model, prefix).items():
+    for key, leaf in leaves.items():
+        value = _encode(leaf)
         if len(value) > MAX_PARAM_VAL_LENGTH:
             warnings.warn(
                 f"param {key!r} is {len(value)} characters and MLflow truncates "
@@ -103,6 +146,15 @@ def log_params(
         },
         hparams_artifact_path(name),
     )
+    _sessions.setdefault(target, {}).update(_session_values(leaves))
+    if target in _claimed:
+        warnings.warn(
+            f"{hparams_artifact_path(name)} was logged to run {target} after "
+            f"runsnap.tensorboard() was entered, so its values are missing from "
+            f"the run's TensorBoard hyperparameters; log params before entering "
+            f"runsnap.tensorboard()",
+            stacklevel=2,
+        )
 
 
 def load_params[M: BaseModel](
