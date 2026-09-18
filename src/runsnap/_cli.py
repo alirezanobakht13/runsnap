@@ -9,8 +9,9 @@ import tempfile
 from contextlib import ExitStack
 from importlib.util import find_spec
 from pathlib import Path
+from typing import Annotated, Literal
 
-from cyclopts import App
+from cyclopts import App, Parameter
 from mlflow.entities import Run
 from mlflow.tracking import MlflowClient
 
@@ -181,6 +182,9 @@ def tb(
     chain: bool = False,
     media: bool = False,
     tracking_uri: str | None = None,
+    bind_all: Annotated[bool, Parameter(name=("--bind_all", "--bind-all"))] = False,
+    port: int | Literal["default"] | None = None,
+    host: str | None = None,
 ) -> None:
     """Open TensorBoard on selected MLflow runs.
 
@@ -198,7 +202,15 @@ def tb(
         Include images, histograms, and other media alongside scalar data.
     tracking_uri
         Tracking server to query, overriding the MLflow environment.
+    bind_all
+        Serve TensorBoard on all network interfaces. Cannot be combined with --host.
+    port
+        TensorBoard port; 0 selects an unused port, default searches from 6006.
+    host
+        Address TensorBoard listens on. Cannot be combined with --bind_all.
     """
+    if bind_all and host is not None:
+        raise CliError("Cannot combine --bind_all with --host.")
     client = make_client(tracking_uri)
     runs = _tb_runs(client, run_refs, experiment, filter)
     if chain:
@@ -207,17 +219,27 @@ def tb(
         if not any(logdir.iterdir()):
             print("No runs found with TensorBoard data matching the selection.")
             return
-        _launch_tensorboard(logdir)
+        _launch_tensorboard(logdir, bind_all=bind_all, port=port, host=host)
 
 
-def _launch_tensorboard(logdir: Path) -> None:
+def _launch_tensorboard(
+    logdir: Path,
+    *,
+    bind_all: bool = False,
+    port: int | Literal["default"] | None = None,
+    host: str | None = None,
+) -> None:
     if find_spec("tensorboard") is None:
         raise CliError("TensorBoard is required; install it with `uv add tensorboard`.")
+    args = [sys.executable, "-m", "tensorboard.main", "--logdir", str(logdir)]
+    if bind_all:
+        args.append("--bind_all")
+    if port is not None:
+        args.extend(["--port", str(port)])
+    if host is not None:
+        args.extend(["--host", host])
     try:
-        subprocess.run(
-            [sys.executable, "-m", "tensorboard.main", "--logdir", str(logdir)],
-            check=True,
-        )
+        subprocess.run(args, check=True)
     except KeyboardInterrupt:
         return
     except (OSError, subprocess.CalledProcessError) as exc:

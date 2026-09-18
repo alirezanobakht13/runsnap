@@ -50,7 +50,7 @@ def cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def viewer(monkeypatch: pytest.MonkeyPatch) -> dict[str, set[str]]:
     viewed = {}
 
-    def launch(logdir: Path) -> None:
+    def launch(logdir: Path, **_options) -> None:
         viewed.update(
             (run.name, {path.name for path in run.iterdir()})
             for run in logdir.iterdir()
@@ -329,14 +329,32 @@ def test_tracking_uri_override(tracking, tmp_path, cache, viewer, monkeypatch):
     assert set(viewer) == {"baseline"}
 
 
-def test_launch_keeps_logdir_until_subprocess_exits(
-    tracking, tmp_path, cache, monkeypatch, capsys
+@pytest.mark.parametrize(
+    ("options", "forwarded"),
+    [
+        ([], []),
+        (["--bind_all"], ["--bind_all"]),
+        (["--bind-all"], ["--bind_all"]),
+        (["--host", "127.0.0.1"], ["--host", "127.0.0.1"]),
+        (["--port", "6007"], ["--port", "6007"]),
+        (["--port", "0"], ["--port", "0"]),
+        (["--port", "default"], ["--port", "default"]),
+        (["--bind_all", "--port", "6007"], ["--bind_all", "--port", "6007"]),
+        (
+            ["--host=127.0.0.1", "--port=6008"],
+            ["--port", "6008", "--host", "127.0.0.1"],
+        ),
+    ],
+)
+def test_launch_forwards_options_and_keeps_logdir_until_subprocess_exits(
+    tracking, tmp_path, cache, monkeypatch, capsys, options, forwarded
 ):
     logged_run(tracking, tmp_path, "baseline")
     directories = []
 
     def run(args, *, check):
         assert args[:4] == [sys.executable, "-m", "tensorboard.main", "--logdir"]
+        assert args[5:] == forwarded
         assert check is True
         logdir = Path(args[4])
         directories.append(logdir)
@@ -345,12 +363,37 @@ def test_launch_keeps_logdir_until_subprocess_exits(
 
     monkeypatch.setattr(_cli.subprocess, "run", run)
 
-    invoke(monkeypatch, "baseline")
+    invoke(monkeypatch, "baseline", *options)
 
     assert len(directories) == 1
     assert not directories[0].exists()
     assert "http://localhost:6006/" in capsys.readouterr().out
     assert list(cache.rglob(LIGHT))
+
+
+@pytest.mark.parametrize("bind_flag", ["--bind_all", "--bind-all"])
+def test_host_and_bind_all_conflict_before_querying(monkeypatch, capsys, bind_flag):
+    client = Mock()
+    monkeypatch.setattr(_cli, "make_client", client)
+
+    with pytest.raises(SystemExit) as raised:
+        invoke(monkeypatch, "baseline", bind_flag, "--host", "127.0.0.1")
+
+    assert raised.value.code == 1
+    assert "Cannot combine --bind_all with --host" in capsys.readouterr().err
+    client.assert_not_called()
+
+
+def test_invalid_port_is_rejected_before_querying(monkeypatch, capsys):
+    client = Mock()
+    monkeypatch.setattr(_cli, "make_client", client)
+
+    with pytest.raises(SystemExit) as raised:
+        invoke(monkeypatch, "baseline", "--port", "invalid")
+
+    assert raised.value.code != 0
+    assert "port" in capsys.readouterr().err.lower()
+    client.assert_not_called()
 
 
 def test_missing_tensorboard_is_actionable(

@@ -159,7 +159,13 @@ runsnap tb --experiment ablations
 runsnap tb --experiment ablations --filter "params.optimizer = 'adamw'"
 runsnap tb baseline --media                # include images and histograms
 runsnap tb baseline --chain                # add the attempts it continues
+runsnap tb baseline --bind_all --port 6007 # listen on all network interfaces
+runsnap tb baseline --host 127.0.0.1 --port 6008
 ```
+
+`--bind_all` (also `--bind-all`) and `--host` are mutually exclusive. `--port 0`
+asks the operating system to select an unused port; `--port default` searches
+for a free port starting at 6006. Omitted options retain TensorBoard's defaults.
 
 For runs logged on the viewing host, the viewer uses the writer's local log
 directory while it exists. TensorBoard shows newly flushed events as training
