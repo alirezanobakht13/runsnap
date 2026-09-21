@@ -4,6 +4,9 @@ import shutil
 import socket
 import threading
 import time
+import warnings
+from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -406,6 +409,16 @@ def wait_for_steps(logdir: Path, tag: str, wanted: list[int]) -> list[int]:
         time.sleep(0.05)
 
 
+def wait_until(condition: Callable[[], bool], timeout: float = 10.0) -> bool:
+    """Whether `condition` came true within `timeout` seconds of polling."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
 def test_assembled_logdir_follows_a_run_still_being_written(tracking, tmp_path: Path):
     with (
         runsnap.start_run(run_name="training", capture_code=False) as active,
@@ -419,3 +432,138 @@ def test_assembled_logdir_follows_a_run_still_being_written(tracking, tmp_path: 
             writer.add_scalar("loss", 0.25, 2)
             writer.flush()
             assert wait_for_steps(link, "loss", [1, 2]) == [1, 2]
+
+
+def test_assembled_logdir_switches_to_the_cache_when_the_writer_exits(
+    tracking, tmp_path: Path
+):
+    cache = tmp_path / "cache"
+    with (
+        runsnap.start_run(run_name="training", capture_code=False) as active,
+        ExitStack() as writing,
+    ):
+        writer = writing.enter_context(
+            runsnap.tensorboard(sync_interval=60.0, flush_secs=0.05)
+        )
+        writer.add_scalar("loss", 0.5, 1)
+        writer.add_scalar("loss", 0.25, 2)
+        run = tracking.get_run(active.info.run_id)
+        with assemble_logdir(
+            tracking, [run], cache_dir=cache, poll_interval=0.05
+        ) as logdir:
+            link = logdir / "training"
+            assert link.resolve() == Path(writer.logdir).resolve()
+            writing.close()
+            assert not Path(writer.logdir).exists()
+            assert wait_until(lambda: cache in link.resolve().parents)
+            assert wait_for_steps(link, "loss", [1, 2]) == [1, 2]
+
+
+def test_live_link_is_repointed_at_the_cache_once_its_directory_goes(
+    tracking, tmp_path: Path
+):
+    run = live_run(tracking, tmp_path, "training", socket.gethostname())
+    cache = tmp_path / "cache"
+    with assemble_logdir(
+        tracking, [run], cache_dir=cache, poll_interval=0.05
+    ) as logdir:
+        link = logdir / "training"
+        assert link.resolve() == (tmp_path / "local-training").resolve()
+        shutil.rmtree(tmp_path / "local-training")
+        assert wait_until(lambda: cache in link.resolve().parents)
+        assert (link / LIGHT).read_bytes() == b"scalar events"
+
+
+def watch_threads() -> list[threading.Thread]:
+    """The live-link watchers currently running, by their thread name."""
+    return [t for t in threading.enumerate() if t.name == "runsnap-tb-watch"]
+
+
+def test_context_of_cached_runs_starts_no_watch_thread(tracking, tmp_path: Path):
+    run = named_run(tracking, tmp_path, "finished")
+    with assemble_logdir(tracking, [run], cache_dir=tmp_path / "cache") as logdir:
+        assert (logdir / "finished").is_symlink()
+        assert watch_threads() == []
+
+
+def test_leaving_a_context_with_live_runs_joins_the_watch_thread(
+    tracking, tmp_path: Path
+):
+    run = live_run(tracking, tmp_path, "training", socket.gethostname())
+    with assemble_logdir(
+        tracking, [run], cache_dir=tmp_path / "cache", poll_interval=60.0
+    ) as logdir:
+        (watch,) = watch_threads()
+        assert watch.is_alive()
+    assert not watch.is_alive()
+    assert watch_threads() == []
+    assert not logdir.exists()
+
+
+def test_live_run_whose_fetch_fails_is_warned_once_and_left_alone(
+    tracking, tmp_path: Path
+):
+    reachable = live_run(tracking, tmp_path, "reachable", socket.gethostname())
+    unreachable = live_run(tracking, tmp_path, "unreachable", socket.gethostname())
+    cache = tmp_path / "cache"
+    download = tracking.download_artifacts
+
+    def refuse_one(run_id: str, artifact: str, destination: str) -> str:
+        if run_id == unreachable.info.run_id:
+            raise OSError("the artifact store is unreachable")
+        return download(run_id, artifact, destination)
+
+    with (
+        patch.object(tracking, "download_artifacts", side_effect=refuse_one),
+        warnings.catch_warnings(record=True) as caught,
+        assemble_logdir(
+            tracking, [reachable, unreachable], cache_dir=cache, poll_interval=0.05
+        ) as logdir,
+    ):
+        warnings.simplefilter("always")
+        stale = logdir / "unreachable"
+        good = logdir / "reachable"
+        shutil.rmtree(tmp_path / "local-unreachable")
+        shutil.rmtree(tmp_path / "local-reachable")
+        assert wait_until(lambda: cache in good.resolve().parents)
+        assert (good / LIGHT).read_bytes() == b"scalar events"
+        # Several more polls would each re-warn if the run stayed watched.
+        time.sleep(0.5)
+        assert stale.is_symlink()
+        assert stale.readlink() == tmp_path / "local-unreachable"
+        assert not stale.exists()
+
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert unreachable.info.run_id in str(user_warnings[0].message)
+
+
+def test_live_run_whose_directory_remains_is_never_fetched(tracking, tmp_path: Path):
+    run = live_run(tracking, tmp_path, "training", socket.gethostname())
+    with (
+        patch.object(tracking, "download_artifacts") as download,
+        assemble_logdir(
+            tracking, [run], cache_dir=tmp_path / "cache", poll_interval=0.02
+        ) as logdir,
+    ):
+        link = logdir / "training"
+        time.sleep(0.3)  # a dozen or so polls
+        assert link.resolve() == (tmp_path / "local-training").resolve()
+        assert (link / LIGHT).read_bytes() == b"live scalar events"
+    download.assert_not_called()
+
+
+@pytest.mark.parametrize("media", [False, True])
+def test_repointed_link_matches_the_media_choice(tracking, tmp_path: Path, media):
+    run = live_run(tracking, tmp_path, "training", socket.gethostname())
+    cache = tmp_path / "cache"
+    with assemble_logdir(
+        tracking, [run], cache_dir=cache, media=media, poll_interval=0.05
+    ) as logdir:
+        link = logdir / "training"
+        shutil.rmtree(tmp_path / "local-training")
+        assert wait_until(lambda: cache in link.resolve().parents)
+        view = "events" if media else "scalars"
+        assert link.resolve() == cache.resolve() / run.info.run_id / view
+        assert (link / LIGHT).read_bytes() == b"scalar events"
+        assert (link / MEDIA).exists() == media

@@ -3,6 +3,7 @@
 import os
 import re
 import socket
+import threading
 import warnings
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
@@ -24,6 +25,9 @@ from runsnap._tags import (
 
 FETCH_WORKERS = 8
 """Runs fetched at once, a cap on concurrent downloads from one server."""
+
+LIVE_POLL_SECONDS = 5.0
+"""How often a live run's directory is checked for having been removed."""
 
 LIGHT_NAME = re.compile(rf"{re.escape(TB_LIGHT_SUFFIX)}(\.\d+)?$")
 """Matches a scalar event file, sharded or not.
@@ -92,12 +96,18 @@ def assemble_logdir(
     *,
     cache_dir: Path | None = None,
     media: bool = False,
+    poll_interval: float = LIVE_POLL_SECONDS,
 ) -> Iterator[Path]:
     """Yield a temporary directory of named links to cached runs.
 
     A run still being written on this host is linked to the directory it is
     being written to, so TensorBoard tails the growing files themselves; every
     other run is downloaded into the cache first, several runs at a time.
+
+    While the context is open, a thread checks every `poll_interval` seconds
+    whether a live run's directory has been removed, which its writer does on
+    leaving its block, and then fetches that run into the cache and re-points
+    its link there, so TensorBoard rediscovers it on its next reload.
 
     Keep this context open while TensorBoard runs. Its links are removed on
     exit, while downloaded event files remain available for later invocations.
@@ -131,7 +141,22 @@ def assemble_logdir(
         logdir = Path(tmp)
         for name, run_id in links.items():
             (logdir / name).symlink_to(paths[run_id], target_is_directory=True)
-        yield logdir
+        watched = {
+            run_id: logdir / name
+            for name, run_id in links.items()
+            if live[run_id] is not None
+        }
+        if not watched:
+            yield logdir
+            return
+        watch = _LiveWatch(
+            client, watched, cache_dir=cache_dir, media=media, interval=poll_interval
+        )
+        watch.start()
+        try:
+            yield logdir
+        finally:
+            watch.stop()
 
 
 def _fetch_runs(
@@ -163,6 +188,63 @@ def _fetch_runs(
             # a reason to abandon the runs that were fetched.
             warnings.warn(f"runsnap could not fetch run {run_id}: {exc}", stacklevel=4)
     return fetched
+
+
+class _LiveWatch:
+    """Re-points a live run's link at the cache once its directory is gone.
+
+    A run linked live points at its writer's scratch directory, which the
+    writer removes after its final upload. The thread checks each watched link
+    every `interval` seconds and, when the directory it points at is gone,
+    fetches the run and links the same name to the cached copy so TensorBoard
+    rediscovers it on its next reload. A run whose fetch fails is reported as
+    a warning and left as it is, as `_fetch_runs` does at startup.
+    """
+
+    def __init__(
+        self,
+        client: MlflowClient,
+        links: dict[str, Path],
+        *,
+        cache_dir: Path | None,
+        media: bool,
+        interval: float,
+    ) -> None:
+        self._client = client
+        self._links = links
+        self._cache_dir = cache_dir
+        self._media = media
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._loop, name="runsnap-tb-watch", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop the thread and wait for a fetch in flight to finish."""
+        self._stop.set()
+        self._thread.join()
+
+    def _loop(self) -> None:
+        while self._links and not self._stop.wait(self._interval):
+            for run_id in [r for r, link in self._links.items() if not link.is_dir()]:
+                self._repoint(run_id)
+
+    def _repoint(self, run_id: str) -> None:
+        link = self._links.pop(run_id)
+        try:
+            cached = fetch_run(
+                self._client, run_id, cache_dir=self._cache_dir, media=self._media
+            )
+        except Exception as exc:  # noqa: BLE001 - one unreachable run is not
+            # a reason to stop watching the others.
+            warnings.warn(f"runsnap could not fetch run {run_id}: {exc}", stacklevel=2)
+            return
+        link.unlink()
+        link.symlink_to(cached, target_is_directory=True)
 
 
 def _distinct_names(base: str, run_id: str) -> Iterator[str]:

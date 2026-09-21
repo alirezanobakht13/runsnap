@@ -177,8 +177,12 @@ A run the tracking server will not hand over is reported as a warning and left
 out of the dashboard, so the rest of the selection still opens.
 Live and cached runs appear together under their MLflow names; unchanged
 downloads are reused from a local cache. TensorBoard prints its URL and runs in
-the foreground until Ctrl-C. If a live writer block exits while the dashboard
-is open, rerun the command to view its final uploaded artifacts.
+the foreground until Ctrl-C. When a live writer block exits while the dashboard
+is open, the run switches to its uploaded artifacts on its own: its final events
+are fetched into the cache and TensorBoard picks the run up again on its next
+reload, a few seconds later, with the same `--media` choice as the rest of the
+dashboard. A run killed without leaving its writer block keeps its local
+directory and stays shown from there.
 
 During logging, writers flush events to local disk every 10 seconds by default;
 pass `runsnap.tensorboard(flush_secs=60)` to override the interval. The background
