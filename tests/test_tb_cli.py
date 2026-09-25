@@ -3,6 +3,9 @@
 import socket
 import subprocess
 import sys
+import time
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -87,6 +90,49 @@ def record_calls(
     monkeypatch.setattr(client, method, spy)
     monkeypatch.setattr(_cli, "make_client", lambda uri: client)
     return calls
+
+
+@pytest.fixture
+def fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the assembled directory re-run a followed selection every 20 ms."""
+    monkeypatch.setattr(
+        _cli, "assemble_logdir", partial(_cli.assemble_logdir, poll_interval=0.02)
+    )
+
+
+def launch_while(
+    monkeypatch: pytest.MonkeyPatch, during: Callable[[Path], None]
+) -> dict[str, Path]:
+    """Where each link points once `during` returns, called with the open logdir.
+
+    The dict is filled when the launch returns.
+    """
+    linked: dict[str, Path] = {}
+
+    def launch(logdir: Path, **_options) -> None:
+        during(logdir)
+        linked.update((link.name, link.resolve()) for link in logdir.iterdir())
+
+    monkeypatch.setattr(_cli, "_launch_tensorboard", launch)
+    return linked
+
+
+def tag_live(client: MlflowClient, run: Run, local: Path) -> None:
+    """Tag `run` as writing into `local` on this host, as its writer would."""
+    local.mkdir()
+    (local / LIGHT).write_bytes(b"live events")
+    client.set_tag(run.info.run_id, TB_TAG_LOCAL_HOST, socket.gethostname())
+    client.set_tag(run.info.run_id, TB_TAG_LOCAL_DIR, str(local))
+
+
+def wait_until(condition: Callable[[], bool], timeout: float = 10.0) -> bool:
+    """Whether `condition` came true within `timeout` seconds of polling."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
 
 
 def test_explicit_ids_and_names(tracking, tmp_path, cache, viewer, monkeypatch):
@@ -187,6 +233,28 @@ def test_a_named_experiment_is_resolved_without_enumerating_them(
     assert enumerations == []
 
 
+def test_each_followed_pass_enumerates_experiments_once(
+    tracking, tmp_path, cache, fast_polls, monkeypatch
+):
+    logged_run(tracking, tmp_path, "finished")
+    enumerations = record_calls(monkeypatch, tracking, "search_experiments")
+    searches = record_calls(monkeypatch, tracking, "search_runs")
+
+    def start_training(logdir: Path) -> None:
+        training = logged_run(tracking, tmp_path, "training")
+        tag_live(tracking, training, tmp_path / "local")
+        assert wait_until((logdir / "training").exists)
+
+    launch_while(monkeypatch, start_training)
+
+    invoke(monkeypatch)
+
+    # One page of runs per pass, so each search is one pass: startup's or a
+    # followed one.
+    assert len(searches) >= 2
+    assert len(enumerations) == len(searches)
+
+
 def test_chain_pulls_in_earlier_attempts(
     tracking, tmp_path, cache, viewer, monkeypatch
 ):
@@ -263,6 +331,72 @@ def test_without_the_flag_only_the_named_run_is_shown(
     invoke(monkeypatch, "attempt-2")
 
     assert set(viewer) == {"attempt-2"}
+
+
+@pytest.mark.parametrize("new_experiment", [False, True])
+def test_a_query_adds_a_run_that_starts_after_launch(
+    tracking, tmp_path, cache, fast_polls, monkeypatch, new_experiment
+):
+    logged_run(tracking, tmp_path, "finished")
+    local = tmp_path / "local"
+
+    def start_training(logdir: Path) -> None:
+        experiment_id = (
+            tracking.create_experiment(
+                "later", artifact_location=(tmp_path / "later").as_uri()
+            )
+            if new_experiment
+            else None
+        )
+        run = logged_run(tracking, tmp_path, "training", experiment_id=experiment_id)
+        tag_live(tracking, run, local)
+        assert wait_until((logdir / "training").exists)
+
+    linked = launch_while(monkeypatch, start_training)
+
+    invoke(monkeypatch)
+
+    assert set(linked) == {"finished", "training"}
+    assert linked["training"] == local.resolve()
+
+
+def test_a_followed_experiment_ignores_a_new_run_elsewhere(
+    tracking, tmp_path, cache, fast_polls, monkeypatch
+):
+    logged_run(tracking, tmp_path, "finished")
+    other = tracking.create_experiment(
+        "elsewhere", artifact_location=(tmp_path / "elsewhere").as_uri()
+    )
+
+    def start_both(logdir: Path) -> None:
+        outside = logged_run(tracking, tmp_path, "outside", experiment_id=other)
+        tag_live(tracking, outside, tmp_path / "outside")
+        # Tagged after the outside run, so a pass that links it saw both.
+        tag_live(tracking, logged_run(tracking, tmp_path, "inside"), tmp_path / "in")
+        assert wait_until((logdir / "inside").exists)
+
+    linked = launch_while(monkeypatch, start_both)
+
+    invoke(monkeypatch, "--experiment", "runsnap-tests")
+
+    assert set(linked) == {"finished", "inside"}
+
+
+def test_a_named_selection_adds_no_new_run(
+    tracking, tmp_path, cache, fast_polls, monkeypatch
+):
+    logged_run(tracking, tmp_path, "baseline")
+
+    def start_training(logdir: Path) -> None:
+        training = logged_run(tracking, tmp_path, "training")
+        tag_live(tracking, training, tmp_path / "local")
+        time.sleep(0.3)  # a dozen or so polls
+
+    linked = launch_while(monkeypatch, start_training)
+
+    invoke(monkeypatch, "baseline")
+
+    assert set(linked) == {"baseline"}
 
 
 @pytest.mark.parametrize("selection", ["empty", "no-events", "filter"])

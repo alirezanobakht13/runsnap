@@ -90,6 +90,15 @@ def attempt_runs(client: MlflowClient, run_id: str) -> list[Run]:
     return chain
 
 
+def with_attempts(client: MlflowClient, runs: list[Run]) -> list[Run]:
+    """`runs` followed by every attempt they continue, each run appearing once."""
+    extended = {run.info.run_id: run for run in runs}
+    for run in runs:
+        for attempt in attempt_runs(client, run.info.run_id):
+            extended.setdefault(attempt.info.run_id, attempt)
+    return list(extended.values())
+
+
 def attempt_chain(run_id: str, client: MlflowClient | None = None) -> list[str]:
     """`run_id` and every attempt it continues, newest attempt first.
 

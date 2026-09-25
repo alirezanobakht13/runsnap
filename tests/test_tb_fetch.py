@@ -17,7 +17,7 @@ from mlflow.tracking import MlflowClient
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 import runsnap
-from runsnap._tags import TB_TAG_LOCAL_DIR, TB_TAG_LOCAL_HOST
+from runsnap._tags import TAG_CONTINUES, TB_TAG_LOCAL_DIR, TB_TAG_LOCAL_HOST
 from runsnap._tb_fetch import assemble_logdir, fetch_run
 from runsnap._tensorboard import TensorBoardWriter
 
@@ -567,3 +567,248 @@ def test_repointed_link_matches_the_media_choice(tracking, tmp_path: Path, media
         assert link.resolve() == cache.resolve() / run.info.run_id / view
         assert (link / LIGHT).read_bytes() == b"scalar events"
         assert (link / MEDIA).exists() == media
+
+
+def everything(client: MlflowClient) -> Callable[[], list[Run]]:
+    """A selection of every run in the test experiment, re-run on each call."""
+    experiment = client.get_experiment_by_name("runsnap-tests")
+    assert experiment is not None
+    return lambda: client.search_runs([experiment.experiment_id])
+
+
+def test_following_a_selection_starts_a_watch_thread_without_live_runs(
+    tracking, tmp_path: Path
+):
+    run = named_run(tracking, tmp_path, "finished")
+    with assemble_logdir(
+        tracking,
+        [run],
+        cache_dir=tmp_path / "cache",
+        follow=everything(tracking),
+        poll_interval=60.0,
+    ) as logdir:
+        assert (logdir / "finished").is_symlink()
+        (watch,) = watch_threads()
+        assert watch.is_alive()
+    assert not watch.is_alive()
+    assert watch_threads() == []
+
+
+def test_a_run_that_starts_later_is_linked_live_then_from_the_cache(
+    tracking, tmp_path: Path
+):
+    shown = named_run(tracking, tmp_path, "finished")
+    cache = tmp_path / "cache"
+    with assemble_logdir(
+        tracking,
+        [shown],
+        cache_dir=cache,
+        follow=everything(tracking),
+        poll_interval=0.05,
+    ) as logdir:
+        live_run(tracking, tmp_path, "training", socket.gethostname())
+        link = logdir / "training"
+        assert wait_until(link.exists)
+        assert link.resolve() == (tmp_path / "local-training").resolve()
+        assert (link / LIGHT).read_bytes() == b"live scalar events"
+        shutil.rmtree(tmp_path / "local-training")
+        assert wait_until(lambda: cache in link.resolve().parents)
+        assert (link / LIGHT).read_bytes() == b"scalar events"
+        assert (logdir / "finished" / LIGHT).read_bytes() == b"scalar events"
+
+
+def test_a_run_is_linked_only_once_it_carries_its_local_directory(
+    tracking, tmp_path: Path
+):
+    with (
+        patch.object(
+            tracking, "list_artifacts", wraps=tracking.list_artifacts
+        ) as listing,
+        patch.object(
+            tracking, "download_artifacts", wraps=tracking.download_artifacts
+        ) as download,
+        assemble_logdir(
+            tracking,
+            [],
+            cache_dir=tmp_path / "cache",
+            follow=everything(tracking),
+            poll_interval=0.02,
+        ) as logdir,
+    ):
+        run = named_run(tracking, tmp_path, "training")
+        time.sleep(0.3)  # a dozen or so passes
+        assert list(logdir.iterdir()) == []
+        listing.assert_not_called()
+        download.assert_not_called()
+        local = tmp_path / "local"
+        local.mkdir()
+        (local / LIGHT).write_bytes(b"live scalar events")
+        tracking.set_tag(run.info.run_id, TB_TAG_LOCAL_HOST, socket.gethostname())
+        tracking.set_tag(run.info.run_id, TB_TAG_LOCAL_DIR, str(local))
+        link = logdir / "training"
+        assert wait_until(link.exists)
+        assert link.resolve() == local.resolve()
+
+
+def test_a_run_selected_before_it_wrote_events_is_linked_once_it_does(
+    tracking, tmp_path: Path
+):
+    with mlflow.start_run(run_name="training") as active:
+        pending = tracking.get_run(active.info.run_id)
+    with assemble_logdir(
+        tracking,
+        [pending],
+        cache_dir=tmp_path / "cache",
+        follow=everything(tracking),
+        poll_interval=0.05,
+    ) as logdir:
+        assert list(logdir.iterdir()) == []
+        local = tmp_path / "local"
+        local.mkdir()
+        (local / LIGHT).write_bytes(b"live scalar events")
+        tracking.set_tag(pending.info.run_id, TB_TAG_LOCAL_HOST, socket.gethostname())
+        tracking.set_tag(pending.info.run_id, TB_TAG_LOCAL_DIR, str(local))
+        link = logdir / "training"
+        assert wait_until(link.exists)
+        assert link.resolve() == local.resolve()
+
+
+def test_a_late_run_whose_writer_already_exited_is_linked_from_the_cache(
+    tracking, tmp_path: Path
+):
+    cache = tmp_path / "cache"
+    with assemble_logdir(
+        tracking, [], cache_dir=cache, follow=everything(tracking), poll_interval=0.05
+    ) as logdir:
+        run = named_run(tracking, tmp_path, "training")
+        tracking.set_tag(run.info.run_id, TB_TAG_LOCAL_HOST, socket.gethostname())
+        tracking.set_tag(run.info.run_id, TB_TAG_LOCAL_DIR, str(tmp_path / "gone"))
+        link = logdir / "training"
+        assert wait_until(link.exists)
+        assert cache in link.resolve().parents
+        assert (link / LIGHT).read_bytes() == b"scalar events"
+
+
+def test_a_late_run_named_like_a_shown_run_is_distinguished(tracking, tmp_path: Path):
+    shown = named_run(tracking, tmp_path, "baseline")
+    with assemble_logdir(
+        tracking,
+        [shown],
+        cache_dir=tmp_path / "cache",
+        follow=everything(tracking),
+        poll_interval=0.05,
+    ) as logdir:
+        target = (logdir / "baseline").resolve()
+        late = live_run(tracking, tmp_path, "baseline", socket.gethostname())
+        link = logdir / f"baseline-{late.info.run_id[:8]}"
+        assert wait_until(link.exists)
+        assert link.resolve() == (tmp_path / "local-baseline").resolve()
+        assert {p.name for p in logdir.iterdir()} == {"baseline", link.name}
+        assert (logdir / "baseline").resolve() == target
+
+
+def test_a_late_run_named_like_runs_shown_distinguished_is_distinguished_too(
+    tracking, tmp_path: Path
+):
+    first = named_run(tracking, tmp_path, "baseline")
+    second = named_run(tracking, tmp_path, "baseline")
+    with assemble_logdir(
+        tracking,
+        [first, second],
+        cache_dir=tmp_path / "cache",
+        follow=everything(tracking),
+        poll_interval=0.05,
+    ) as logdir:
+        before = {p.name: p.resolve() for p in logdir.iterdir()}
+        assert set(before) == {
+            f"baseline-{first.info.run_id[:8]}",
+            f"baseline-{second.info.run_id[:8]}",
+        }
+        late = live_run(tracking, tmp_path, "baseline", socket.gethostname())
+        link = logdir / f"baseline-{late.info.run_id[:8]}"
+        assert wait_until(link.exists)
+        after = {p.name: p.resolve() for p in logdir.iterdir()}
+        assert after == {**before, link.name: (tmp_path / "local-baseline").resolve()}
+
+
+def test_a_late_run_brings_its_earlier_attempt_with_chain(tracking, tmp_path: Path):
+    earlier = named_run(tracking, tmp_path, "attempt-1")
+    late = named_run(tracking, tmp_path, "attempt-2")
+    tracking.set_tag(late.info.run_id, TAG_CONTINUES, earlier.info.run_id)
+    local = tmp_path / "local"
+    local.mkdir()
+    (local / LIGHT).write_bytes(b"live scalar events")
+    with (
+        patch.object(tracking, "get_run", wraps=tracking.get_run) as get_run,
+        assemble_logdir(
+            tracking,
+            [],
+            cache_dir=tmp_path / "cache",
+            chain=True,
+            follow=everything(tracking),
+            poll_interval=0.02,
+        ) as logdir,
+    ):
+        tracking.set_tag(late.info.run_id, TB_TAG_LOCAL_HOST, socket.gethostname())
+        tracking.set_tag(late.info.run_id, TB_TAG_LOCAL_DIR, str(local))
+        assert wait_until(
+            lambda: {p.name for p in logdir.iterdir()} == {"attempt-1", "attempt-2"}
+        )
+        time.sleep(0.3)  # later passes would fetch the chain again
+        assert (logdir / "attempt-2").resolve() == local.resolve()
+        assert (logdir / "attempt-1" / LIGHT).read_bytes() == b"scalar events"
+    assert sorted(call.args[0] for call in get_run.call_args_list) == sorted(
+        [earlier.info.run_id, late.info.run_id]
+    )
+
+
+def test_a_pass_never_fetches_a_shown_run_again(tracking, tmp_path: Path):
+    shown = live_run(tracking, tmp_path, "training", "elsewhere")
+    with (
+        patch.object(
+            tracking, "list_artifacts", wraps=tracking.list_artifacts
+        ) as listing,
+        assemble_logdir(
+            tracking,
+            [shown],
+            cache_dir=tmp_path / "cache",
+            follow=everything(tracking),
+            poll_interval=0.02,
+        ) as logdir,
+    ):
+        assert (logdir / "training" / LIGHT).read_bytes() == b"scalar events"
+        listing.reset_mock()
+        time.sleep(0.3)  # a dozen or so passes
+    listing.assert_not_called()
+
+
+def test_a_failing_selection_is_warned_once_and_retried(tracking, tmp_path: Path):
+    shown = named_run(tracking, tmp_path, "finished")
+    query = everything(tracking)
+    failures = 5
+
+    def flaky() -> list[Run]:
+        nonlocal failures
+        if failures:
+            failures -= 1
+            raise ConnectionError("the tracking server is unreachable")
+        return query()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with assemble_logdir(
+            tracking,
+            [shown],
+            cache_dir=tmp_path / "cache",
+            follow=flaky,
+            poll_interval=0.02,
+        ) as logdir:
+            target = (logdir / "finished").resolve()
+            assert wait_until(lambda: failures == 0)
+            live_run(tracking, tmp_path, "training", socket.gethostname())
+            assert wait_until((logdir / "training").exists)
+            assert (logdir / "finished").resolve() == target
+
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert "the tracking server is unreachable" in str(user_warnings[0].message)

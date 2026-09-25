@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import ExitStack
+from functools import partial
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Annotated, Literal
@@ -35,7 +36,6 @@ from runsnap._git import (
     patch_files,
     remove_worktree,
 )
-from runsnap._lifecycle import attempt_runs
 from runsnap._tags import (
     PATCH_ARTIFACT_PATH,
     TAG_BRANCH,
@@ -165,15 +165,6 @@ def _tb_runs(
             return matches
 
 
-def _with_chains(client: MlflowClient, runs: list[Run]) -> list[Run]:
-    """`runs` followed by every attempt they continue, each run appearing once."""
-    extended = {run.info.run_id: run for run in runs}
-    for run in runs:
-        for attempt in attempt_runs(client, run.info.run_id):
-            extended.setdefault(attempt.info.run_id, attempt)
-    return list(extended.values())
-
-
 @app.command
 def tb(
     *run_refs: str,
@@ -191,7 +182,9 @@ def tb(
     Parameters
     ----------
     run_refs
-        Run ids or names. Omit to search all runs in the selected experiments.
+        Run ids or names. Omit to search all runs in the selected experiments;
+        runs that start writing events later are then added while TensorBoard
+        is open.
     experiment
         Experiment name, defaulting to all experiments.
     filter
@@ -213,9 +206,10 @@ def tb(
         raise CliError("Cannot combine --bind_all with --host.")
     client = make_client(tracking_uri)
     runs = _tb_runs(client, run_refs, experiment, filter)
-    if chain:
-        runs = _with_chains(client, runs)
-    with assemble_logdir(client, runs, media=media) as logdir:
+    follow = None if run_refs else partial(_tb_runs, client, (), experiment, filter)
+    with assemble_logdir(
+        client, runs, media=media, chain=chain, follow=follow
+    ) as logdir:
         if not any(logdir.iterdir()):
             print("No runs found with TensorBoard data matching the selection.")
             return

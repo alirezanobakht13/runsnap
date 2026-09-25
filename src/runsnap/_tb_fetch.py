@@ -6,7 +6,7 @@ import socket
 import threading
 import warnings
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from itertools import count
@@ -16,6 +16,7 @@ from tempfile import TemporaryDirectory
 from mlflow.entities import FileInfo, Run
 from mlflow.tracking import MlflowClient
 
+from runsnap._lifecycle import with_attempts
 from runsnap._tags import (
     TB_ARTIFACT_DIR,
     TB_LIGHT_SUFFIX,
@@ -27,7 +28,8 @@ FETCH_WORKERS = 8
 """Runs fetched at once, a cap on concurrent downloads from one server."""
 
 LIVE_POLL_SECONDS = 5.0
-"""How often a live run's directory is checked for having been removed."""
+"""How often a live run's directory is checked for having been removed, and a
+followed selection is re-run for runs that have begun writing events."""
 
 LIGHT_NAME = re.compile(rf"{re.escape(TB_LIGHT_SUFFIX)}(\.\d+)?$")
 """Matches a scalar event file, sharded or not.
@@ -96,9 +98,13 @@ def assemble_logdir(
     *,
     cache_dir: Path | None = None,
     media: bool = False,
+    chain: bool = False,
+    follow: Callable[[], Iterable[Run]] | None = None,
     poll_interval: float = LIVE_POLL_SECONDS,
 ) -> Iterator[Path]:
     """Yield a temporary directory of named links to cached runs.
+
+    With `chain`, every earlier attempt the runs continue is linked too.
 
     A run still being written on this host is linked to the directory it is
     being written to, so TensorBoard tails the growing files themselves; every
@@ -109,12 +115,58 @@ def assemble_logdir(
     leaving its block, and then fetches that run into the cache and re-points
     its link there, so TensorBoard rediscovers it on its next reload.
 
+    With `follow`, the same thread also calls it on every check and links each
+    run it returns that has since begun writing through `runsnap.tensorboard()`,
+    as a run given at startup would be linked. Runs already linked keep their
+    names, and a run whose name is already shown is linked under a distinct one.
+
     Keep this context open while TensorBoard runs. Its links are removed on
     exit, while downloaded event files remain available for later invocations.
     Runs without event data are omitted, as are runs whose fetch failed.
     """
+    if chain:
+        runs = with_attempts(client, list(runs))
     selected = {run.info.run_id: run for run in runs}
-    live = {run_id: _live_logdir(run) for run_id, run in selected.items()}
+    with TemporaryDirectory(prefix="runsnap-tb-") as tmp:
+        logdir = Path(tmp)
+        watch = _LiveWatch(
+            client,
+            logdir,
+            follow=follow,
+            chain=chain,
+            cache_dir=cache_dir,
+            media=media,
+            interval=poll_interval,
+        )
+        shown = watch.link(selected)
+        # A run neither shown nor tagged with its local directory may not have
+        # begun writing yet, so a later pass may still link it.
+        tagged = {
+            run_id
+            for run_id, run in selected.items()
+            if TB_TAG_LOCAL_DIR in run.data.tags
+        }
+        watch.start(handled=shown | tagged)
+        try:
+            yield logdir
+        finally:
+            watch.stop()
+
+
+def _link_targets(
+    client: MlflowClient,
+    runs: Iterable[Run],
+    *,
+    cache_dir: Path | None,
+    media: bool,
+) -> tuple[dict[str, Path], set[str]]:
+    """Where each run holding event data is linked from, and which are live.
+
+    A run still being written on this host is linked to the directory it is
+    being written to; every other run is downloaded into the cache first.
+    Runs without event data are left out, as are runs whose fetch failed.
+    """
+    live = {run.info.run_id: _live_logdir(run) for run in runs}
     fetched = _fetch_runs(
         client,
         [run_id for run_id, path in live.items() if path is None],
@@ -126,37 +178,12 @@ def assemble_logdir(
         for run_id, path in live.items()
         if path is not None or run_id in fetched
     }
-    names = {
-        run_id: _run_name(selected[run_id])
+    targets = {
+        run_id: path
         for run_id, path in paths.items()
         if any(path.rglob("events.out.tfevents.*"))
     }
-    counts = Counter(names.values())
-    links = {name: run_id for run_id, name in names.items() if counts[name] == 1}
-    for run_id, name in names.items():
-        if counts[name] > 1:
-            distinct = _distinct_names(name, run_id)
-            links[next(n for n in distinct if n not in links)] = run_id
-    with TemporaryDirectory(prefix="runsnap-tb-") as tmp:
-        logdir = Path(tmp)
-        for name, run_id in links.items():
-            (logdir / name).symlink_to(paths[run_id], target_is_directory=True)
-        watched = {
-            run_id: logdir / name
-            for name, run_id in links.items()
-            if live[run_id] is not None
-        }
-        if not watched:
-            yield logdir
-            return
-        watch = _LiveWatch(
-            client, watched, cache_dir=cache_dir, media=media, interval=poll_interval
-        )
-        watch.start()
-        try:
-            yield logdir
-        finally:
-            watch.stop()
+    return targets, {run_id for run_id in targets if live[run_id] is not None}
 
 
 def _fetch_runs(
@@ -186,52 +213,123 @@ def _fetch_runs(
             fetched[run_id] = future.result()
         except Exception as exc:  # noqa: BLE001 - one unreachable run is not
             # a reason to abandon the runs that were fetched.
-            warnings.warn(f"runsnap could not fetch run {run_id}: {exc}", stacklevel=4)
+            warnings.warn(f"runsnap could not fetch run {run_id}: {exc}", stacklevel=6)
     return fetched
 
 
 class _LiveWatch:
-    """Re-points a live run's link at the cache once its directory is gone.
+    """Links runs into `logdir` and keeps those links current.
 
     A run linked live points at its writer's scratch directory, which the
-    writer removes after its final upload. The thread checks each watched link
+    writer removes after its final upload. The thread checks each live link
     every `interval` seconds and, when the directory it points at is gone,
     fetches the run and links the same name to the cached copy so TensorBoard
     rediscovers it on its next reload. A run whose fetch fails is reported as
     a warning and left as it is, as `_fetch_runs` does at startup.
+
+    With `follow`, each check then re-runs that selection and links the runs
+    that carry their local directory tag, which the writer sets once its event
+    files exist, and that were not handled before. A failing pass is reported
+    once until a pass succeeds again, and never ends the thread.
     """
 
     def __init__(
         self,
         client: MlflowClient,
-        links: dict[str, Path],
+        logdir: Path,
         *,
+        follow: Callable[[], Iterable[Run]] | None,
+        chain: bool,
         cache_dir: Path | None,
         media: bool,
         interval: float,
     ) -> None:
         self._client = client
-        self._links = links
+        self._logdir = logdir
+        self._follow = follow
+        self._chain = chain
         self._cache_dir = cache_dir
         self._media = media
         self._interval = interval
+        self._links: dict[str, Path] = {}
+        self._shown: set[str] = set()
+        self._handled: set[str] = set()
+        self._failing = False
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._loop, name="runsnap-tb-watch", daemon=True
         )
 
-    def start(self) -> None:
-        self._thread.start()
+    def link(self, runs: dict[str, Run]) -> set[str]:
+        """Link each of `runs`, keyed by id, that holds event data.
+
+        A run gets its own name unless another run in `runs`, a run linked
+        before, or an existing link has it; links made before keep theirs.
+        Returns the ids of the runs linked.
+        """
+        targets, live = _link_targets(
+            self._client, runs.values(), cache_dir=self._cache_dir, media=self._media
+        )
+        bases = {run_id: _run_name(runs[run_id]) for run_id in targets}
+        taken = {path.name for path in self._logdir.iterdir()}
+        names = _link_names(bases, self._shown, taken)
+        for run_id, name in names.items():
+            (self._logdir / name).symlink_to(targets[run_id], target_is_directory=True)
+        self._shown.update(bases.values())
+        self._links.update((run_id, self._logdir / names[run_id]) for run_id in live)
+        return set(names)
+
+    def start(self, *, handled: set[str]) -> None:
+        """Start the thread when there are live links or a selection to follow.
+
+        A run in `handled` is never linked by a later pass.
+        """
+        self._handled = handled
+        if self._links or self._follow is not None:
+            self._thread.start()
 
     def stop(self) -> None:
-        """Stop the thread and wait for a fetch in flight to finish."""
+        """Stop the thread and wait for a check in flight to finish."""
         self._stop.set()
-        self._thread.join()
+        if self._thread.is_alive():
+            self._thread.join()
 
     def _loop(self) -> None:
-        while self._links and not self._stop.wait(self._interval):
+        while not self._stop.wait(self._interval):
             for run_id in [r for r, link in self._links.items() if not link.is_dir()]:
                 self._repoint(run_id)
+            if self._follow is not None:
+                self._follow_pass(self._follow)
+            elif not self._links:
+                return
+
+    def _follow_pass(self, follow: Callable[[], Iterable[Run]]) -> None:
+        try:
+            ready = [
+                run
+                for run in follow()
+                if TB_TAG_LOCAL_DIR in run.data.tags
+                and run.info.run_id not in self._handled
+            ]
+            if self._chain:
+                ready = with_attempts(self._client, ready)
+            batch = {
+                run.info.run_id: run
+                for run in ready
+                if run.info.run_id not in self._handled
+            }
+            # Handled before linking, so a pass that fails midway never
+            # links the same run twice.
+            self._handled.update(batch)
+            self.link(batch)
+        except Exception as exc:  # noqa: BLE001 - keep following
+            if not self._failing:
+                warnings.warn(
+                    f"runsnap could not follow the selection: {exc}", stacklevel=2
+                )
+            self._failing = True
+        else:
+            self._failing = False
 
     def _repoint(self, run_id: str) -> None:
         link = self._links.pop(run_id)
@@ -245,6 +343,31 @@ class _LiveWatch:
             return
         link.unlink()
         link.symlink_to(cached, target_is_directory=True)
+
+
+def _link_names(
+    bases: dict[str, str], shown: set[str], taken: set[str]
+) -> dict[str, str]:
+    """Link names for the runs in `bases`, which maps run ids to their own names.
+
+    `shown` holds the own names of runs already linked, and `taken` the names
+    of their links. A run keeps its own name when it is unique in `bases` and
+    in neither set; every other run gets the first of its `_distinct_names`
+    not yet taken.
+    """
+    counts = Counter(bases.values())
+    names = {
+        run_id: base
+        for run_id, base in bases.items()
+        if counts[base] == 1 and base not in shown and base not in taken
+    }
+    used = taken | set(names.values())
+    for run_id, base in bases.items():
+        if run_id not in names:
+            name = next(n for n in _distinct_names(base, run_id) if n not in used)
+            names[run_id] = name
+            used.add(name)
+    return names
 
 
 def _distinct_names(base: str, run_id: str) -> Iterator[str]:

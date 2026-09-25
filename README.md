@@ -172,7 +172,8 @@ directory while it exists. TensorBoard shows newly flushed events as training
 continues, including images, histograms, and other media regardless of `--media`.
 Runs logged on another host, or whose local directory is gone, use a snapshot
 of their uploaded artifacts: by default only scalars and text, with `--media`
-including other media. Rerun the command to fetch newer uploads for those runs.
+including other media. Rerun the command to fetch newer uploads from runs still
+logging on another host.
 A run the tracking server will not hand over is reported as a warning and left
 out of the dashboard, so the rest of the selection still opens.
 Live and cached runs appear together under their MLflow names; unchanged
@@ -183,6 +184,17 @@ are fetched into the cache and TensorBoard picks the run up again on its next
 reload, a few seconds later, with the same `--media` choice as the rest of the
 dashboard. A run killed without leaving its writer block keeps its local
 directory and stays shown from there.
+
+Without run ids or names (bare `runsnap tb`, `--experiment`, or `--filter`), the
+dashboard also re-runs its selection every few seconds and adds each matching
+run once it enters `runsnap.tensorboard()`, including runs in experiments created
+after the dashboard opened. Such a run is shown as one found at startup would be:
+live from its local directory, then from the cache once its writer exits, with
+the same `--media` and `--chain` choices. Runs already shown keep their names; a
+new run named like a shown one appears with part of its run id appended. Runs
+stay shown after they stop matching the selection, and named runs stay as they
+were resolved at startup. A run that starts on another host is usually found
+before its first upload and then stays absent; rerun the command to see it.
 
 During logging, writers flush events to local disk every 10 seconds by default;
 pass `runsnap.tensorboard(flush_secs=60)` to override the interval. The background
