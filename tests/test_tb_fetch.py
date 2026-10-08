@@ -8,17 +8,17 @@ import warnings
 from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import mlflow
 import pytest
-from mlflow.entities import Run
+from mlflow.entities import FileInfo, Run
 from mlflow.tracking import MlflowClient
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 import runsnap
 from runsnap._tags import TAG_CONTINUES, TB_TAG_LOCAL_DIR, TB_TAG_LOCAL_HOST
-from runsnap._tb_fetch import assemble_logdir, fetch_run
+from runsnap._tb_fetch import _run_statuses, assemble_logdir, fetch_run
 from runsnap._tensorboard import TensorBoardWriter
 
 LIGHT = "events.out.tfevents.1.host.scalars"
@@ -148,6 +148,59 @@ def test_interrupted_download_preserves_previous_file(tracking, tmp_path: Path):
     assert not list(logdir.parent.glob(".download-*"))
     fetch_run(tracking, run.info.run_id, cache_dir=cache)
     assert (logdir / LIGHT).read_bytes() == source.read_bytes()
+
+
+def log_light(client: MlflowClient, run: Run, tmp_path: Path, content: bytes) -> None:
+    source = tmp_path / "source" / LIGHT
+    source.write_bytes(content)
+    client.log_artifact(run.info.run_id, str(source), "tb")
+
+
+def test_grown_remote_file_extends_the_cached_file_in_place(tracking, tmp_path: Path):
+    run = logged_run(tracking, tmp_path)
+    cache = tmp_path / "cache"
+    logdir = fetch_run(tracking, run.info.run_id, cache_dir=cache)
+    inode = (logdir / LIGHT).stat().st_ino
+    log_light(tracking, run, tmp_path, b"scalar events with another step")
+    fetch_run(tracking, run.info.run_id, cache_dir=cache)
+    assert (logdir / LIGHT).stat().st_ino == inode
+    assert (logdir / LIGHT).read_bytes() == b"scalar events with another step"
+
+
+def test_shorter_remote_file_leaves_the_cached_file_alone(tracking, tmp_path: Path):
+    run = logged_run(tracking, tmp_path)
+    cache = tmp_path / "cache"
+    logdir = fetch_run(tracking, run.info.run_id, cache_dir=cache)
+    log_light(tracking, run, tmp_path, b"scalar")
+    with patch.object(
+        tracking, "download_artifacts", wraps=tracking.download_artifacts
+    ) as download:
+        fetch_run(tracking, run.info.run_id, cache_dir=cache)
+    download.assert_not_called()
+    assert (logdir / LIGHT).read_bytes() == b"scalar events"
+
+
+def test_remote_file_not_extending_the_cached_one_replaces_it(tracking, tmp_path: Path):
+    run = logged_run(tracking, tmp_path)
+    cache = tmp_path / "cache"
+    logdir = fetch_run(tracking, run.info.run_id, cache_dir=cache)
+    log_light(tracking, run, tmp_path, b"rewritten scalar events")
+    fetch_run(tracking, run.info.run_id, cache_dir=cache)
+    assert (logdir / LIGHT).read_bytes() == b"rewritten scalar events"
+
+
+def test_cache_file_cut_to_a_prefix_is_completed_by_the_next_fetch(
+    tracking, tmp_path: Path
+):
+    run = logged_run(tracking, tmp_path)
+    cache = tmp_path / "cache"
+    logdir = fetch_run(tracking, run.info.run_id, cache_dir=cache)
+    inode = (logdir / LIGHT).stat().st_ino
+    # An interrupted append leaves a prefix of the remote file in place.
+    (logdir / LIGHT).write_bytes(b"scalar")
+    fetch_run(tracking, run.info.run_id, cache_dir=cache)
+    assert (logdir / LIGHT).stat().st_ino == inode
+    assert (logdir / LIGHT).read_bytes() == b"scalar events"
 
 
 def test_stale_link_is_repointed_at_the_cached_file(tracking, tmp_path: Path):
@@ -479,11 +532,26 @@ def watch_threads() -> list[threading.Thread]:
     return [t for t in threading.enumerate() if t.name == "runsnap-tb-watch"]
 
 
-def test_context_of_cached_runs_starts_no_watch_thread(tracking, tmp_path: Path):
+def wait_for_checks(check: Mock, count: int = 2) -> bool:
+    """Whether `count` more checks of the shown runs began, so one ran in full."""
+    wanted = check.call_count + count
+    return wait_until(lambda: check.call_count >= wanted)
+
+
+def test_context_of_cached_runs_watches_them_until_exit(tracking, tmp_path: Path):
     run = named_run(tracking, tmp_path, "finished")
-    with assemble_logdir(tracking, [run], cache_dir=tmp_path / "cache") as logdir:
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        assemble_logdir(
+            tracking, [run], cache_dir=tmp_path / "cache", poll_interval=0.02
+        ) as logdir,
+    ):
         assert (logdir / "finished").is_symlink()
-        assert watch_threads() == []
+        (watch,) = watch_threads()
+        assert wait_for_checks(check)
+    assert not watch.is_alive()
+    assert watch_threads() == []
+    assert not logdir.exists()
 
 
 def test_leaving_a_context_with_live_runs_joins_the_watch_thread(
@@ -569,11 +637,17 @@ def test_repointed_link_matches_the_media_choice(tracking, tmp_path: Path, media
         assert (link / MEDIA).exists() == media
 
 
-def everything(client: MlflowClient) -> Callable[[], list[Run]]:
-    """A selection of every run in the test experiment, re-run on each call."""
+def logging_experiment(client: MlflowClient) -> str:
+    """The id of the experiment the `tracking` fixture logs runs into."""
     experiment = client.get_experiment_by_name("runsnap-tests")
     assert experiment is not None
-    return lambda: client.search_runs([experiment.experiment_id])
+    return experiment.experiment_id
+
+
+def everything(client: MlflowClient) -> Callable[[], list[Run]]:
+    """A selection of every run in the test experiment, re-run on each call."""
+    experiment_id = logging_experiment(client)
+    return lambda: client.search_runs([experiment_id])
 
 
 def test_following_a_selection_starts_a_watch_thread_without_live_runs(
@@ -762,24 +836,29 @@ def test_a_late_run_brings_its_earlier_attempt_with_chain(tracking, tmp_path: Pa
     )
 
 
-def test_a_pass_never_fetches_a_shown_run_again(tracking, tmp_path: Path):
+@pytest.mark.parametrize("followed", [False, True])
+def test_a_pass_never_fetches_a_run_finished_at_startup(
+    tracking, tmp_path: Path, followed: bool
+):
     shown = live_run(tracking, tmp_path, "training", "elsewhere")
+    assert shown.info.status == "FINISHED"
+    listing = Mock(wraps=tracking.list_artifacts)
+    check, passes = recording_checks(listing, shown.info.run_id)
     with (
-        patch.object(
-            tracking, "list_artifacts", wraps=tracking.list_artifacts
-        ) as listing,
+        patch("runsnap._tb_fetch._run_statuses", check),
+        patch.object(tracking, "list_artifacts", listing),
         assemble_logdir(
             tracking,
             [shown],
             cache_dir=tmp_path / "cache",
-            follow=everything(tracking),
+            follow=everything(tracking) if followed else None,
             poll_interval=0.02,
         ) as logdir,
     ):
         assert (logdir / "training" / LIGHT).read_bytes() == b"scalar events"
-        listing.reset_mock()
-        time.sleep(0.3)  # a dozen or so passes
-    listing.assert_not_called()
+        assert wait_for_checks(check, 10)
+    # Every listing was made at startup, before the first pass.
+    assert listings(listing, shown.info.run_id) == passes[0][1]
 
 
 def test_a_failing_selection_is_warned_once_and_retried(tracking, tmp_path: Path):
@@ -812,3 +891,719 @@ def test_a_failing_selection_is_warned_once_and_retried(tracking, tmp_path: Path
     user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
     assert len(user_warnings) == 1
     assert "the tracking server is unreachable" in str(user_warnings[0].message)
+
+
+def test_check_reports_the_status_of_each_run_it_finds(tracking, tmp_path: Path):
+    finished = named_run(tracking, tmp_path, "finished").info.run_id
+    experiment_id = logging_experiment(tracking)
+    running = tracking.create_run(experiment_id).info.run_id
+    statuses = _run_statuses(
+        tracking, {running: experiment_id, finished: experiment_id}
+    )
+    assert statuses == {running: "RUNNING", finished: "FINISHED"}
+
+
+def test_check_leaves_out_deleted_runs_and_runs_of_deleted_experiments(
+    tracking, tmp_path: Path
+):
+    experiment_id = logging_experiment(tracking)
+    kept = tracking.create_run(experiment_id).info.run_id
+    deleted = tracking.create_run(experiment_id).info.run_id
+    tracking.delete_run(deleted)
+    doomed = tracking.create_experiment(
+        "doomed", artifact_location=(tmp_path / "doomed").as_uri()
+    )
+    orphan = tracking.create_run(doomed).info.run_id
+    tracking.delete_experiment(doomed)
+    statuses = _run_statuses(
+        tracking, {kept: experiment_id, deleted: experiment_id, orphan: doomed}
+    )
+    assert statuses == {kept: "RUNNING"}
+
+
+def test_check_searches_once_per_two_hundred_runs(tracking):
+    experiment_id = logging_experiment(tracking)
+    found = tracking.create_run(experiment_id).info.run_id
+    runs = {f"{n:032x}": experiment_id for n in range(449)} | {found: experiment_id}
+    with patch.object(tracking, "search_runs", wraps=tracking.search_runs) as search:
+        assert _run_statuses(tracking, runs) == {found: "RUNNING"}
+    assert search.call_count == 3
+
+
+def test_a_deleted_run_leaves_the_dashboard_and_the_cache(tracking, tmp_path: Path):
+    kept = named_run(tracking, tmp_path, "kept")
+    deleted = named_run(tracking, tmp_path, "deleted")
+    cache = tmp_path / "cache"
+    with assemble_logdir(
+        tracking, [kept, deleted], cache_dir=cache, poll_interval=0.05
+    ) as logdir:
+        link = logdir / "deleted"
+        folder = cache / deleted.info.run_id
+        assert link.is_symlink()
+        assert folder.is_dir()
+        tracking.delete_run(deleted.info.run_id)
+        assert wait_until(lambda: not link.is_symlink() and not folder.exists())
+        assert [p.name for p in logdir.iterdir()] == ["kept"]
+        assert (logdir / "kept" / LIGHT).read_bytes() == b"scalar events"
+        assert (cache / kept.info.run_id).is_dir()
+
+
+def test_deleting_the_experiment_of_shown_runs_removes_them(tracking, tmp_path: Path):
+    runs = [named_run(tracking, tmp_path, name) for name in ["first", "second"]]
+    with assemble_logdir(
+        tracking, runs, cache_dir=tmp_path / "cache", poll_interval=0.05
+    ) as logdir:
+        assert {p.name for p in logdir.iterdir()} == {"first", "second"}
+        tracking.delete_experiment(logging_experiment(tracking))
+        assert wait_until(lambda: not any(logdir.iterdir()))
+
+
+@pytest.mark.parametrize("status", ["FINISHED", "FAILED", "KILLED"])
+def test_a_run_that_ends_stays_shown(tracking, tmp_path: Path, status: str):
+    run = named_run(tracking, tmp_path, "training")
+    tracking.update_run(run.info.run_id, status="RUNNING")
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        assemble_logdir(
+            tracking, [run], cache_dir=tmp_path / "cache", poll_interval=0.02
+        ) as logdir,
+    ):
+        assert wait_for_checks(check)
+        tracking.set_terminated(run.info.run_id, status)
+        assert wait_for_checks(check)
+        assert (logdir / "training" / LIGHT).read_bytes() == b"scalar events"
+
+
+def test_a_failing_check_is_warned_once_and_removes_nothing(tracking, tmp_path: Path):
+    kept = named_run(tracking, tmp_path, "kept")
+    deleted = named_run(tracking, tmp_path, "deleted")
+    failures = 0
+    recovered = threading.Event()
+
+    def flaky(client: MlflowClient, runs: dict[str, str]) -> dict[str, str]:
+        nonlocal failures
+        if not recovered.is_set():
+            failures += 1
+            raise ConnectionError("the tracking server is unreachable")
+        return _run_statuses(client, runs)
+
+    with (
+        patch("runsnap._tb_fetch._run_statuses", side_effect=flaky),
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        with assemble_logdir(
+            tracking,
+            [kept, deleted],
+            cache_dir=tmp_path / "cache",
+            poll_interval=0.02,
+        ) as logdir:
+            tracking.delete_run(deleted.info.run_id)
+            assert wait_until(lambda: failures >= 5)
+            assert {p.name for p in logdir.iterdir()} == {"kept", "deleted"}
+            assert (logdir / "deleted" / LIGHT).read_bytes() == b"scalar events"
+            recovered.set()
+            assert wait_until(lambda: not (logdir / "deleted").is_symlink())
+            assert (logdir / "kept" / LIGHT).read_bytes() == b"scalar events"
+
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert "the tracking server is unreachable" in str(user_warnings[0].message)
+
+
+def remote_run(client: MlflowClient, tmp_path: Path, name: str) -> Run:
+    """A run tagged as being written on another host, so it is shown cached."""
+    run = named_run(client, tmp_path, name)
+    client.set_tag(run.info.run_id, TB_TAG_LOCAL_HOST, "elsewhere")
+    client.set_tag(run.info.run_id, TB_TAG_LOCAL_DIR, f"/elsewhere/{name}")
+    return client.get_run(run.info.run_id)
+
+
+def test_a_restored_run_of_a_followed_query_is_shown_again(tracking, tmp_path: Path):
+    run = remote_run(tracking, tmp_path, "training")
+    with assemble_logdir(
+        tracking,
+        [run],
+        cache_dir=tmp_path / "cache",
+        follow=everything(tracking),
+        poll_interval=0.05,
+    ) as logdir:
+        link = logdir / "training"
+        tracking.delete_run(run.info.run_id)
+        assert wait_until(lambda: not link.is_symlink())
+        tracking.restore_run(run.info.run_id)
+        assert wait_until(link.exists)
+        assert (link / LIGHT).read_bytes() == b"scalar events"
+
+
+def test_a_restored_named_run_is_shown_again(tracking, tmp_path: Path):
+    run = named_run(tracking, tmp_path, "baseline")
+    with assemble_logdir(
+        tracking, [run], cache_dir=tmp_path / "cache", poll_interval=0.05
+    ) as logdir:
+        link = logdir / "baseline"
+        tracking.delete_run(run.info.run_id)
+        assert wait_until(lambda: not link.is_symlink())
+        tracking.restore_run(run.info.run_id)
+        assert wait_until(link.exists)
+        assert (link / LIGHT).read_bytes() == b"scalar events"
+
+
+def test_a_restored_run_whose_name_a_late_run_took_is_distinguished(
+    tracking, tmp_path: Path
+):
+    old = remote_run(tracking, tmp_path, "baseline")
+    with assemble_logdir(
+        tracking,
+        [old],
+        cache_dir=tmp_path / "cache",
+        follow=everything(tracking),
+        poll_interval=0.05,
+    ) as logdir:
+        link = logdir / "baseline"
+        tracking.delete_run(old.info.run_id)
+        assert wait_until(lambda: not link.is_symlink())
+        late = remote_run(tracking, tmp_path, "baseline")
+        assert wait_until(link.exists)
+        assert late.info.run_id in link.resolve().parts
+        tracking.restore_run(old.info.run_id)
+        returned = logdir / f"baseline-{old.info.run_id[:8]}"
+        assert wait_until(returned.exists)
+        assert old.info.run_id in returned.resolve().parts
+        assert {p.name for p in logdir.iterdir()} == {"baseline", returned.name}
+
+
+def starting_run(client: MlflowClient, name: str) -> Run:
+    """A running run tagged as writing on another host that uploaded nothing."""
+    run_id = client.create_run(logging_experiment(client), run_name=name).info.run_id
+    client.set_tag(run_id, TB_TAG_LOCAL_HOST, "elsewhere")
+    client.set_tag(run_id, TB_TAG_LOCAL_DIR, f"/elsewhere/{name}")
+    return client.get_run(run_id)
+
+
+def listings(listing: Mock, run_id: str) -> int:
+    """How many artifact listings of `run_id` the `listing` spy recorded."""
+    return sum(call.args[0] == run_id for call in listing.call_args_list)
+
+
+def recording_checks(
+    listing: Mock, run_id: str
+) -> tuple[Mock, list[tuple[str | None, int]]]:
+    """A check of the shown runs that records each pass as it begins.
+
+    Each pass notes the status the check reports for `run_id` and how many
+    listings of it `listing` recorded before.
+    """
+    passes: list[tuple[str | None, int]] = []
+
+    def check(client: MlflowClient, runs: dict[str, str]) -> dict[str, str]:
+        statuses = _run_statuses(client, runs)
+        passes.append((statuses.get(run_id), listings(listing, run_id)))
+        return statuses
+
+    return Mock(side_effect=check), passes
+
+
+def test_a_run_from_another_host_is_linked_once_it_uploads(tracking, tmp_path: Path):
+    run = starting_run(tracking, "training")
+    with assemble_logdir(
+        tracking, [run], cache_dir=tmp_path / "cache", poll_interval=0.05
+    ) as logdir:
+        assert list(logdir.iterdir()) == []
+        (tmp_path / "source").mkdir()
+        log_light(tracking, run, tmp_path, b"scalar events")
+        link = logdir / "training"
+        assert wait_until(link.exists)
+        assert (link / LIGHT).read_bytes() == b"scalar events"
+
+
+def test_a_followed_run_from_another_host_is_linked_once_it_uploads(
+    tracking, tmp_path: Path
+):
+    with (
+        patch.object(
+            tracking, "list_artifacts", wraps=tracking.list_artifacts
+        ) as listing,
+        assemble_logdir(
+            tracking,
+            [],
+            cache_dir=tmp_path / "cache",
+            follow=everything(tracking),
+            poll_interval=0.05,
+        ) as logdir,
+    ):
+        run = starting_run(tracking, "training")
+        # Found by the selection, then tried again while pending.
+        assert wait_until(lambda: listings(listing, run.info.run_id) >= 2)
+        assert list(logdir.iterdir()) == []
+        (tmp_path / "source").mkdir()
+        log_light(tracking, run, tmp_path, b"scalar events")
+        link = logdir / "training"
+        assert wait_until(link.exists)
+        assert (link / LIGHT).read_bytes() == b"scalar events"
+
+
+@pytest.mark.parametrize("followed", [False, True])
+def test_a_pending_run_that_ends_without_events_is_dropped(
+    tracking, tmp_path: Path, followed: bool
+):
+    run = starting_run(tracking, "training")
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        patch.object(
+            tracking, "list_artifacts", wraps=tracking.list_artifacts
+        ) as listing,
+        assemble_logdir(
+            tracking,
+            [run],
+            cache_dir=tmp_path / "cache",
+            follow=everything(tracking) if followed else None,
+            poll_interval=0.02,
+        ) as logdir,
+    ):
+        assert wait_for_checks(check)
+        assert listings(listing, run.info.run_id) >= 2
+        tracking.set_terminated(run.info.run_id, "FAILED")
+        # The pass whose check sees the run ended gives it a last try.
+        assert wait_for_checks(check)
+        listing.reset_mock()
+        assert wait_for_checks(check, 10)
+        assert list(logdir.iterdir()) == []
+    listing.assert_not_called()
+
+
+def test_a_pass_never_lists_untagged_or_ended_runs(tracking, tmp_path: Path):
+    experiment_id = logging_experiment(tracking)
+    ended = starting_run(tracking, "ended").info.run_id
+    tracking.set_terminated(ended, "KILLED")
+    untagged = tracking.create_run(experiment_id).info.run_id
+    selected = [tracking.get_run(ended), tracking.get_run(untagged)]
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        patch.object(
+            tracking, "list_artifacts", wraps=tracking.list_artifacts
+        ) as listing,
+        assemble_logdir(
+            tracking,
+            selected,
+            cache_dir=tmp_path / "cache",
+            follow=everything(tracking),
+            poll_interval=0.02,
+        ) as logdir,
+    ):
+        # Startup tried both; an untagged run the selection returns later is
+        # never tried at all.
+        listing.reset_mock()
+        tracking.create_run(experiment_id)
+        assert wait_for_checks(check, 10)
+        assert list(logdir.iterdir()) == []
+    listing.assert_not_called()
+
+
+def test_a_running_run_from_another_host_gains_its_new_uploads(
+    tracking, tmp_path: Path
+):
+    run = starting_run(tracking, "training")
+    source = tmp_path / "events"
+    writer = TensorBoardWriter(source, flush_secs=0.05)
+    writer.add_scalar("loss", 0.5, 1)
+    assert wait_for_steps(source, "loss", [1]) == [1]
+    tracking.log_artifact(run.info.run_id, str(writer.light_path), "tb")
+    with assemble_logdir(
+        tracking, [run], cache_dir=tmp_path / "cache", poll_interval=0.05
+    ) as logdir:
+        link = logdir / "training"
+        assert wait_for_steps(link, "loss", [1]) == [1]
+        writer.add_scalar("loss", 0.25, 2)
+        writer.close()
+        tracking.log_artifact(run.info.run_id, str(writer.light_path), "tb")
+        assert wait_for_steps(link, "loss", [1, 2]) == [1, 2]
+
+
+def test_a_run_that_finishes_is_fetched_once_more_and_never_again(
+    tracking, tmp_path: Path
+):
+    run = starting_run(tracking, "training")
+    run_id = run.info.run_id
+    (tmp_path / "source").mkdir()
+    log_light(tracking, run, tmp_path, b"scalar events")
+    listing = Mock(wraps=tracking.list_artifacts)
+    check, passes = recording_checks(listing, run_id)
+    with (
+        patch("runsnap._tb_fetch._run_statuses", check),
+        patch.object(tracking, "list_artifacts", listing),
+        assemble_logdir(
+            tracking, [run], cache_dir=tmp_path / "cache", poll_interval=0.02
+        ) as logdir,
+    ):
+        # Fetched at startup, then again by a pass while running.
+        assert wait_for_checks(check)
+        assert listings(listing, run_id) >= 2
+        log_light(tracking, run, tmp_path, b"scalar events and the last step")
+        tracking.set_terminated(run_id)
+        assert wait_until(lambda: [s for s, _ in passes].count("FINISHED") >= 10)
+        link = logdir / "training"
+        assert (link / LIGHT).read_bytes() == b"scalar events and the last step"
+    ended = [count for status, count in passes if status == "FINISHED"]
+    assert listings(listing, run_id) == ended[0] + 1
+
+
+def test_a_failing_refresh_is_warned_once_and_keeps_the_run(tracking, tmp_path: Path):
+    run = starting_run(tracking, "training")
+    (tmp_path / "source").mkdir()
+    log_light(tracking, run, tmp_path, b"scalar events")
+    list_artifacts = tracking.list_artifacts
+    unreachable = threading.Event()
+
+    def flaky(run_id: str, path: str) -> list[FileInfo]:
+        if unreachable.is_set():
+            raise ConnectionError("the artifact store is unreachable")
+        return list_artifacts(run_id, path)
+
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        patch.object(tracking, "list_artifacts", side_effect=flaky) as listing,
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        with assemble_logdir(
+            tracking, [run], cache_dir=tmp_path / "cache", poll_interval=0.02
+        ) as logdir:
+            link = logdir / "training"
+            unreachable.set()
+            tried = listings(listing, run.info.run_id)
+            assert wait_for_checks(check, 5)
+            # Each pass tried again, and the run kept what it had.
+            assert listings(listing, run.info.run_id) >= tried + 3
+            assert (link / LIGHT).read_bytes() == b"scalar events"
+            unreachable.clear()
+            log_light(tracking, run, tmp_path, b"scalar events and more")
+            assert wait_until(
+                lambda: (link / LIGHT).read_bytes() == b"scalar events and more"
+            )
+
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert run.info.run_id in str(user_warnings[0].message)
+    assert "the artifact store is unreachable" in str(user_warnings[0].message)
+
+
+@pytest.mark.parametrize("uploaded", [True, False])
+def test_a_run_that_ends_before_the_first_pass_gets_one_final_fetch(
+    tracking, tmp_path: Path, uploaded: bool
+):
+    """A run ending before the first pass is still fetched one final time.
+
+    Shown at startup, or pending without data, the run uploads its last events
+    and ends before the first pass checks it.
+    """
+    run = starting_run(tracking, "training")
+    run_id = run.info.run_id
+    (tmp_path / "source").mkdir()
+    if uploaded:
+        log_light(tracking, run, tmp_path, b"scalar events")
+    listing = Mock(wraps=tracking.list_artifacts)
+    record, passes = recording_checks(listing, run_id)
+
+    def end_first(client: MlflowClient, runs: dict[str, str]) -> dict[str, str]:
+        if not passes:
+            log_light(tracking, run, tmp_path, b"scalar events and the last step")
+            tracking.set_terminated(run_id)
+        return record(client, runs)
+
+    with (
+        patch("runsnap._tb_fetch._run_statuses", side_effect=end_first),
+        patch.object(tracking, "list_artifacts", listing),
+        assemble_logdir(
+            tracking, [run], cache_dir=tmp_path / "cache", poll_interval=0.02
+        ) as logdir,
+    ):
+        assert wait_until(lambda: len(passes) >= 10)
+        link = logdir / "training"
+        assert (link / LIGHT).read_bytes() == b"scalar events and the last step"
+    assert passes[0][0] == "FINISHED"
+    assert listings(listing, run_id) == passes[0][1] + 1
+
+
+def stored_run(client: MlflowClient, root: Path, name: str) -> tuple[Run, Path]:
+    """A running run tagged as writing on another host, and its TensorBoard folder.
+
+    The run is stored as a tracking server started with
+    `--artifacts-destination root` stores it, and its folder under `root` is
+    still empty.
+    """
+    experiment = client.get_experiment_by_name("stored")
+    experiment_id = (
+        client.create_experiment("stored", artifact_location="mlflow-artifacts:/stored")
+        if experiment is None
+        else experiment.experiment_id
+    )
+    run_id = client.create_run(experiment_id, run_name=name).info.run_id
+    client.set_tag(run_id, TB_TAG_LOCAL_HOST, "elsewhere")
+    client.set_tag(run_id, TB_TAG_LOCAL_DIR, f"/elsewhere/{name}")
+    folder = root / "stored" / run_id / "artifacts" / "tb"
+    folder.mkdir(parents=True)
+    return client.get_run(run_id), folder
+
+
+def test_a_stored_run_is_linked_from_its_folder_under_the_artifact_root(
+    tracking, tmp_path: Path
+):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    (folder / LIGHT).write_bytes(b"stored scalar events")
+    with assemble_logdir(
+        tracking, [run], cache_dir=tmp_path / "cache", artifact_root=root
+    ) as logdir:
+        link = logdir / "training"
+        assert link.is_dir()
+        assert not link.is_symlink()
+        assert (link / LIGHT).readlink() == folder.resolve() / LIGHT
+        assert (link / LIGHT).read_bytes() == b"stored scalar events"
+
+
+def test_a_run_stored_elsewhere_is_warned_about_once_and_left_out(
+    tracking, tmp_path: Path
+):
+    root = tmp_path / "root"
+    stored, folder = stored_run(tracking, root, "stored")
+    (folder / LIGHT).write_bytes(b"stored scalar events")
+    # Running in the `file:` experiment, so a followed query keeps finding it.
+    elsewhere = starting_run(tracking, "elsewhere")
+    (tmp_path / "source").mkdir()
+    log_light(tracking, elsewhere, tmp_path, b"scalar events")
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        patch.object(tracking, "list_artifacts") as listing,
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        with assemble_logdir(
+            tracking,
+            [stored, elsewhere],
+            cache_dir=tmp_path / "cache",
+            follow=everything(tracking),
+            poll_interval=0.02,
+            artifact_root=root,
+        ) as logdir:
+            assert wait_for_checks(check, 10)
+            assert [p.name for p in logdir.iterdir()] == ["stored"]
+    listing.assert_not_called()
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert elsewhere.info.run_id in str(user_warnings[0].message)
+
+
+def test_a_run_whose_artifacts_lead_out_of_the_root_is_refused(
+    tracking, tmp_path: Path
+):
+    root = tmp_path / "root"
+    root.mkdir()
+    experiment_id = tracking.create_experiment(
+        "escaping", artifact_location="mlflow-artifacts:/../outside"
+    )
+    run = tracking.create_run(experiment_id, run_name="escaping")
+    folder = tmp_path / "outside" / run.info.run_id / "artifacts" / "tb"
+    folder.mkdir(parents=True)
+    (folder / LIGHT).write_bytes(b"scalar events")
+    with (
+        pytest.warns(UserWarning, match=run.info.run_id),
+        assemble_logdir(
+            tracking, [run], cache_dir=tmp_path / "cache", artifact_root=root
+        ) as logdir,
+    ):
+        assert list(logdir.iterdir()) == []
+
+
+def test_viewing_from_the_artifact_root_neither_lists_nor_downloads_nor_caches(
+    tracking, tmp_path: Path
+):
+    root = tmp_path / "root"
+    shown, folder = stored_run(tracking, root, "training")
+    (folder / LIGHT).write_bytes(b"stored scalar events")
+    starting, _ = stored_run(tracking, root, "starting")
+    cache = tmp_path / "cache"
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        patch("runsnap._tb_fetch._live_logdir") as live,
+        patch.object(tracking, "list_artifacts") as listing,
+        patch.object(tracking, "download_artifacts") as download,
+        assemble_logdir(
+            tracking,
+            [shown, starting],
+            cache_dir=cache,
+            poll_interval=0.02,
+            artifact_root=root,
+        ) as logdir,
+    ):
+        # Passes refresh the shown run and retry the pending one, while they
+        # run and once more after they end.
+        assert wait_for_checks(check, 5)
+        tracking.set_terminated(shown.info.run_id)
+        tracking.set_terminated(starting.info.run_id)
+        assert wait_for_checks(check, 5)
+        assert [p.name for p in logdir.iterdir()] == ["training"]
+    live.assert_not_called()
+    listing.assert_not_called()
+    download.assert_not_called()
+    assert not cache.exists()
+
+
+def test_only_scalar_files_are_linked_from_the_artifact_root(tracking, tmp_path: Path):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    nested = folder / "nested"
+    nested.mkdir()
+    for directory in (folder, nested):
+        (directory / LIGHT_SHARDS[0]).write_bytes(b"scalar events")
+        (directory / MEDIA).write_bytes(b"media events")
+    with assemble_logdir(
+        tracking, [run], cache_dir=tmp_path / "cache", artifact_root=root
+    ) as logdir:
+        link = logdir / "training"
+        entries = {p.relative_to(link).as_posix(): p for p in link.rglob("*")}
+        assert set(entries) == {
+            LIGHT_SHARDS[0],
+            "nested",
+            f"nested/{LIGHT_SHARDS[0]}",
+        }
+        assert not entries["nested"].is_symlink()
+        assert entries[f"nested/{LIGHT_SHARDS[0]}"].readlink() == (
+            nested.resolve() / LIGHT_SHARDS[0]
+        )
+
+
+def test_a_new_scalar_shard_in_the_artifact_root_is_linked(tracking, tmp_path: Path):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    with assemble_logdir(
+        tracking,
+        [run],
+        cache_dir=tmp_path / "cache",
+        poll_interval=0.05,
+        artifact_root=root,
+    ) as logdir:
+        # Pending until its first shard reaches the folder.
+        assert list(logdir.iterdir()) == []
+        link = logdir / "training"
+        (folder / LIGHT_SHARDS[0]).write_bytes(b"first shard")
+        assert wait_until((link / LIGHT_SHARDS[0]).exists)
+        (folder / LIGHT_SHARDS[1]).write_bytes(b"second shard")
+        assert wait_until((link / LIGHT_SHARDS[1]).exists)
+        assert (link / LIGHT_SHARDS[1]).read_bytes() == b"second shard"
+
+
+def test_a_run_that_ends_gets_its_last_shard_linked_and_no_more(
+    tracking, tmp_path: Path
+):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    (folder / LIGHT_SHARDS[0]).write_bytes(b"first shard")
+    checks = 0
+
+    def end_first(client: MlflowClient, runs: dict[str, str]) -> dict[str, str]:
+        nonlocal checks
+        if not checks:
+            (folder / LIGHT_SHARDS[1]).write_bytes(b"last shard")
+            tracking.set_terminated(run.info.run_id)
+        checks += 1
+        return _run_statuses(client, runs)
+
+    late = "events.out.tfevents.4.host.scalars.2"
+    with (
+        patch("runsnap._tb_fetch._run_statuses", side_effect=end_first),
+        assemble_logdir(
+            tracking,
+            [run],
+            cache_dir=tmp_path / "cache",
+            poll_interval=0.02,
+            artifact_root=root,
+        ) as logdir,
+    ):
+        link = logdir / "training"
+        # The second check begins once the first pass, which saw the end, is done.
+        assert wait_until(lambda: checks >= 2)
+        assert (link / LIGHT_SHARDS[1]).read_bytes() == b"last shard"
+        (folder / late).write_bytes(b"too late")
+        done = checks
+        assert wait_until(lambda: checks >= done + 10)
+        assert not (link / late).is_symlink()
+
+
+def test_a_scalar_file_replaced_by_a_longer_copy_shows_its_new_steps(
+    tracking, tmp_path: Path
+):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    source = tmp_path / "events"
+    writer = TensorBoardWriter(source, flush_secs=0.05)
+    writer.add_scalar("loss", 0.5, 1)
+    assert wait_for_steps(source, "loss", [1]) == [1]
+    stored = folder / writer.light_path.name
+    shutil.copy(writer.light_path, stored)
+    with assemble_logdir(
+        tracking, [run], cache_dir=tmp_path / "cache", artifact_root=root
+    ) as logdir:
+        accumulator = EventAccumulator(str(logdir / "training"))
+        accumulator.Reload()
+        assert [point.step for point in accumulator.Scalars("loss")] == [1]
+        writer.add_scalar("loss", 0.25, 2)
+        writer.close()
+        # The tracking server stores each upload by moving a copy over the file.
+        upload = tmp_path / "upload"
+        shutil.copy(writer.light_path, upload)
+        upload.replace(stored)
+        accumulator.Reload()
+        assert [point.step for point in accumulator.Scalars("loss")] == [1, 2]
+
+
+def test_a_run_live_on_this_host_is_linked_from_the_artifact_root(
+    tracking, tmp_path: Path
+):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    (folder / LIGHT).write_bytes(b"stored scalar events")
+    local = tmp_path / "local"
+    local.mkdir()
+    (local / LIGHT).write_bytes(b"live scalar events")
+    tracking.set_tag(run.info.run_id, TB_TAG_LOCAL_HOST, socket.gethostname())
+    tracking.set_tag(run.info.run_id, TB_TAG_LOCAL_DIR, str(local))
+    run = tracking.get_run(run.info.run_id)
+    with assemble_logdir(
+        tracking, [run], cache_dir=tmp_path / "cache", artifact_root=root
+    ) as logdir:
+        link = logdir / "training" / LIGHT
+        assert link.readlink() == folder.resolve() / LIGHT
+        assert link.read_bytes() == b"stored scalar events"
+
+
+def test_a_deleted_run_leaves_its_files_in_the_artifact_root(tracking, tmp_path: Path):
+    root = tmp_path / "root"
+    kept, _ = stored_run(tracking, root, "kept")
+    deleted, folder = stored_run(tracking, root, "deleted")
+    for directory in (root / "stored").glob("*/artifacts/tb"):
+        (directory / "nested").mkdir()
+        (directory / LIGHT).write_bytes(b"stored scalar events")
+        (directory / "nested" / LIGHT).write_bytes(b"nested scalar events")
+    # Left by an earlier invocation that downloaded the run.
+    cached = tmp_path / "cache" / deleted.info.run_id / "events" / LIGHT
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"scalar events")
+    with assemble_logdir(
+        tracking,
+        [kept, deleted],
+        cache_dir=tmp_path / "cache",
+        poll_interval=0.05,
+        artifact_root=root,
+    ) as logdir:
+        link = logdir / "deleted"
+        assert (link / "nested" / LIGHT).is_symlink()
+        tracking.delete_run(deleted.info.run_id)
+        assert wait_until(lambda: not link.exists())
+        assert [p.name for p in logdir.iterdir()] == ["kept"]
+        assert (folder / LIGHT).read_bytes() == b"stored scalar events"
+        assert (folder / "nested" / LIGHT).read_bytes() == b"nested scalar events"
+        tracking.restore_run(deleted.info.run_id)
+        assert wait_until((link / "nested" / LIGHT).is_symlink)
+    assert (folder / LIGHT).read_bytes() == b"stored scalar events"
+    assert cached.read_bytes() == b"scalar events"

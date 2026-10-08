@@ -238,7 +238,9 @@ def test_each_followed_pass_enumerates_experiments_once(
 ):
     logged_run(tracking, tmp_path, "finished")
     enumerations = record_calls(monkeypatch, tracking, "search_experiments")
-    searches = record_calls(monkeypatch, tracking, "search_runs")
+    # Each selection is one pass: startup's or a followed one.
+    selections = Mock(wraps=_cli._tb_runs)
+    monkeypatch.setattr(_cli, "_tb_runs", selections)
 
     def start_training(logdir: Path) -> None:
         training = logged_run(tracking, tmp_path, "training")
@@ -249,10 +251,8 @@ def test_each_followed_pass_enumerates_experiments_once(
 
     invoke(monkeypatch)
 
-    # One page of runs per pass, so each search is one pass: startup's or a
-    # followed one.
-    assert len(searches) >= 2
-    assert len(enumerations) == len(searches)
+    assert selections.call_count >= 2
+    assert len(enumerations) == selections.call_count
 
 
 def test_chain_pulls_in_earlier_attempts(
@@ -399,25 +399,78 @@ def test_a_named_selection_adds_no_new_run(
     assert set(linked) == {"baseline"}
 
 
-@pytest.mark.parametrize("selection", ["empty", "no-events", "filter"])
-def test_no_matching_data_does_not_launch(
-    tracking, tmp_path, cache, monkeypatch, capsys, selection
+@pytest.mark.parametrize("filtered", [False, True])
+def test_a_query_matching_nothing_launches_and_shows_a_later_run(
+    tracking, tmp_path, cache, fast_polls, monkeypatch, capsys, filtered
 ):
-    args = ["--experiment", "runsnap-tests"]
-    if selection == "no-events":
-        with mlflow.start_run(run_name="no-events"):
-            pass
-        args = ["no-events"]
-    elif selection == "filter":
+    args = []
+    if filtered:
         logged_run(tracking, tmp_path, "baseline")
-        args.extend(["--filter", "params.optimizer = 'missing'"])
-    launch = Mock()
-    monkeypatch.setattr(_cli, "_launch_tensorboard", launch)
+        args = ["--filter", "params.optimizer = 'sgd'"]
+
+    def start_training(logdir: Path) -> None:
+        assert list(logdir.iterdir()) == []
+        run = logged_run(tracking, tmp_path, "training", optimizer="sgd")
+        tag_live(tracking, run, tmp_path / "local")
+        assert wait_until((logdir / "training").exists)
+
+    linked = launch_while(monkeypatch, start_training)
 
     invoke(monkeypatch, *args)
 
+    assert set(linked) == {"training"}
+    assert "No runs found with TensorBoard data yet" in capsys.readouterr().out
+
+
+def test_a_named_run_awaiting_its_first_upload_launches(
+    tracking, tmp_path, cache, fast_polls, monkeypatch, capsys
+):
+    experiment_id = tracking.get_experiment_by_name("runsnap-tests").experiment_id
+    run = tracking.create_run(
+        experiment_id,
+        run_name="training",
+        tags={TB_TAG_LOCAL_HOST: "elsewhere", TB_TAG_LOCAL_DIR: "/elsewhere/training"},
+    )
+
+    def upload(logdir: Path) -> None:
+        assert list(logdir.iterdir()) == []
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / LIGHT).write_bytes(b"scalar events")
+        tracking.log_artifacts(run.info.run_id, str(source), "tb")
+        assert wait_until((logdir / "training").exists)
+        assert (logdir / "training" / LIGHT).read_bytes() == b"scalar events"
+
+    linked = launch_while(monkeypatch, upload)
+
+    invoke(monkeypatch, "training")
+
+    assert set(linked) == {"training"}
+    assert "No runs found with TensorBoard data yet" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("status", "tagged"),
+    [("FINISHED", False), ("RUNNING", False), ("FINISHED", True)],
+)
+def test_a_named_run_without_data_does_not_launch(
+    tracking, cache, monkeypatch, capsys, status, tagged
+):
+    experiment_id = tracking.get_experiment_by_name("runsnap-tests").experiment_id
+    tags = {TB_TAG_LOCAL_HOST: "elsewhere", TB_TAG_LOCAL_DIR: "/elsewhere/x"}
+    run_id = tracking.create_run(
+        experiment_id, run_name="no-events", tags=tags if tagged else None
+    ).info.run_id
+    if status != "RUNNING":
+        tracking.set_terminated(run_id, status)
+    launch = Mock()
+    monkeypatch.setattr(_cli, "_launch_tensorboard", launch)
+
+    invoke(monkeypatch, "no-events")
+
     launch.assert_not_called()
-    assert "No runs found with TensorBoard data" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "No runs found with TensorBoard data matching the selection." in out
 
 
 def test_media_opt_in(tracking, tmp_path, cache, viewer, monkeypatch):
@@ -478,6 +531,8 @@ def test_tracking_uri_override(tracking, tmp_path, cache, viewer, monkeypatch):
             ["--host=127.0.0.1", "--port=6008"],
             ["--port", "6008", "--host", "127.0.0.1"],
         ),
+        (["--path-prefix", "/tb"], ["--path_prefix", "/tb"]),
+        (["--path_prefix", "/tb"], ["--path_prefix", "/tb"]),
     ],
 )
 def test_launch_forwards_options_and_keeps_logdir_until_subprocess_exits(
@@ -516,6 +571,52 @@ def test_host_and_bind_all_conflict_before_querying(monkeypatch, capsys, bind_fl
     assert raised.value.code == 1
     assert "Cannot combine --bind_all with --host" in capsys.readouterr().err
     client.assert_not_called()
+
+
+def test_media_and_artifact_root_conflict_before_querying(monkeypatch, capsys):
+    client = Mock()
+    monkeypatch.setattr(_cli, "make_client", client)
+
+    with pytest.raises(SystemExit) as raised:
+        invoke(monkeypatch, "--artifact-root", "/srv/artifacts", "--media")
+
+    assert raised.value.code == 1
+    assert "Cannot combine --media with --artifact-root" in capsys.readouterr().err
+    client.assert_not_called()
+
+
+def test_artifact_root_shows_runs_from_the_folder_with_the_python_loader(
+    tracking, tmp_path, cache, monkeypatch
+):
+    # Without `--artifact-root`, the forwarding test above finds no
+    # `--load_fast` among the arguments.
+    root = tmp_path / "root"
+    experiment_id = tracking.create_experiment(
+        "stored", artifact_location="mlflow-artifacts:/stored"
+    )
+    run_id = tracking.create_run(experiment_id, run_name="baseline").info.run_id
+    tracking.set_terminated(run_id)
+    folder = root / "stored" / run_id / "artifacts" / "tb"
+    folder.mkdir(parents=True)
+    (folder / LIGHT).write_bytes(b"scalar events")
+    (folder / MEDIA).write_bytes(b"media events")
+    viewed = {}
+
+    def run(args, *, check):
+        assert args[5:] == ["--load_fast=false"]
+        logdir = Path(args[4])
+        viewed.update(
+            (path.relative_to(logdir).as_posix(), path.readlink())
+            for path in logdir.rglob("*")
+            if path.is_symlink()
+        )
+
+    monkeypatch.setattr(_cli.subprocess, "run", run)
+
+    invoke(monkeypatch, "--artifact-root", str(root))
+
+    assert viewed == {f"baseline/{LIGHT}": folder.resolve() / LIGHT}
+    assert not cache.exists()
 
 
 def test_invalid_port_is_rejected_before_querying(monkeypatch, capsys):

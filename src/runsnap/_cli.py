@@ -46,6 +46,7 @@ from runsnap._tags import (
     TAG_INVOCATION_CWD,
     TAG_PATCH_RUN_ID,
     TAG_PATCH_SHA256,
+    TB_TAG_LOCAL_DIR,
 )
 from runsnap._tb_fetch import assemble_logdir
 
@@ -176,6 +177,10 @@ def tb(
     bind_all: Annotated[bool, Parameter(name=("--bind_all", "--bind-all"))] = False,
     port: int | Literal["default"] | None = None,
     host: str | None = None,
+    path_prefix: Annotated[
+        str | None, Parameter(name=("--path-prefix", "--path_prefix"))
+    ] = None,
+    artifact_root: Path | None = None,
 ) -> None:
     """Open TensorBoard on selected MLflow runs.
 
@@ -184,7 +189,7 @@ def tb(
     run_refs
         Run ids or names. Omit to search all runs in the selected experiments;
         runs that start writing events later are then added while TensorBoard
-        is open.
+        is open, which opens even when no run matches yet.
     experiment
         Experiment name, defaulting to all experiments.
     filter
@@ -201,19 +206,52 @@ def tb(
         TensorBoard port; 0 selects an unused port, default searches from 6006.
     host
         Address TensorBoard listens on. Cannot be combined with --bind_all.
+    path_prefix
+        Path TensorBoard serves under, such as /tb behind a reverse proxy.
+    artifact_root
+        Show runs from this folder instead of downloading them: the tracking
+        server's --artifacts-destination, on the server's own machine. Shows
+        scalar data only. Cannot be combined with --media.
     """
     if bind_all and host is not None:
         raise CliError("Cannot combine --bind_all with --host.")
+    if media and artifact_root is not None:
+        raise CliError(
+            "Cannot combine --media with --artifact-root; "
+            "runs viewed from an artifact folder show scalar data only."
+        )
     client = make_client(tracking_uri)
     runs = _tb_runs(client, run_refs, experiment, filter)
     follow = None if run_refs else partial(_tb_runs, client, (), experiment, filter)
     with assemble_logdir(
-        client, runs, media=media, chain=chain, follow=follow
+        client,
+        runs,
+        media=media,
+        chain=chain,
+        follow=follow,
+        artifact_root=artifact_root,
     ) as logdir:
         if not any(logdir.iterdir()):
-            print("No runs found with TensorBoard data matching the selection.")
-            return
-        _launch_tensorboard(logdir, bind_all=bind_all, port=port, host=host)
+            # A tagged running run left out is pending: it is linked once it
+            # has event data here, as on its first upload from another host.
+            pending = any(
+                TB_TAG_LOCAL_DIR in run.data.tags and run.info.status == "RUNNING"
+                for run in runs
+            )
+            if follow is None and not pending:
+                print("No runs found with TensorBoard data matching the selection.")
+                return
+            print("No runs found with TensorBoard data yet; waiting for them.")
+        # The Python loader re-opens files by name, so it reads the longer
+        # copies the tracking server moves over them.
+        _launch_tensorboard(
+            logdir,
+            bind_all=bind_all,
+            port=port,
+            host=host,
+            path_prefix=path_prefix,
+            load_fast=artifact_root is None,
+        )
 
 
 def _launch_tensorboard(
@@ -222,6 +260,8 @@ def _launch_tensorboard(
     bind_all: bool = False,
     port: int | Literal["default"] | None = None,
     host: str | None = None,
+    path_prefix: str | None = None,
+    load_fast: bool = True,
 ) -> None:
     if find_spec("tensorboard") is None:
         raise CliError("TensorBoard is required; install it with `uv add tensorboard`.")
@@ -232,6 +272,10 @@ def _launch_tensorboard(
         args.extend(["--port", str(port)])
     if host is not None:
         args.extend(["--host", host])
+    if path_prefix is not None:
+        args.extend(["--path_prefix", path_prefix])
+    if not load_fast:
+        args.append("--load_fast=false")
     try:
         subprocess.run(args, check=True)
     except KeyboardInterrupt:

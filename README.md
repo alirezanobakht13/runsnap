@@ -161,19 +161,26 @@ runsnap tb baseline --media                # include images and histograms
 runsnap tb baseline --chain                # add the attempts it continues
 runsnap tb baseline --bind_all --port 6007 # listen on all network interfaces
 runsnap tb baseline --host 127.0.0.1 --port 6008
+runsnap tb --path-prefix /tb               # serve under /tb/ behind a proxy
+runsnap tb --artifact-root /var/lib/mlflow/artifacts  # on the tracking server
 ```
 
 `--bind_all` (also `--bind-all`) and `--host` are mutually exclusive. `--port 0`
 asks the operating system to select an unused port; `--port default` searches
-for a free port starting at 6006. Omitted options retain TensorBoard's defaults.
+for a free port starting at 6006. `--path-prefix` (also `--path_prefix`) serves
+TensorBoard's pages and data under that path, so a reverse proxy can expose it
+at a path such as `/tb/`. Omitted options retain TensorBoard's defaults.
 
 For runs logged on the viewing host, the viewer uses the writer's local log
 directory while it exists. TensorBoard shows newly flushed events as training
 continues, including images, histograms, and other media regardless of `--media`.
-Runs logged on another host, or whose local directory is gone, use a snapshot
-of their uploaded artifacts: by default only scalars and text, with `--media`
-including other media. Rerun the command to fetch newer uploads from runs still
-logging on another host.
+Runs logged on another host, or whose local directory is gone, are shown from
+their uploaded artifacts: by default only scalars and text, with `--media`
+including other media. While MLflow reports such a run as running, the
+dashboard fetches its new uploads every few seconds, so its curves keep growing
+without restarting the command, and fetches the run once more after it ends.
+If such a fetch fails, it is reported once while the failure lasts and retried,
+and the run keeps the data it had.
 A run the tracking server will not hand over is reported as a warning and left
 out of the dashboard, so the rest of the selection still opens.
 Live and cached runs appear together under their MLflow names; unchanged
@@ -185,6 +192,12 @@ reload, a few seconds later, with the same `--media` choice as the rest of the
 dashboard. A run killed without leaving its writer block keeps its local
 directory and stays shown from there.
 
+While the dashboard is open, it also checks the shown runs with MLflow every
+few seconds. A run deleted in MLflow, directly or with its experiment, leaves
+the dashboard within a few seconds, and its downloaded files are removed from
+the cache. Restoring the run brings it back while it is still selected. Runs
+that finish, fail, or are killed stay shown.
+
 Without run ids or names (bare `runsnap tb`, `--experiment`, or `--filter`), the
 dashboard also re-runs its selection every few seconds and adds each matching
 run once it enters `runsnap.tensorboard()`, including runs in experiments created
@@ -193,8 +206,32 @@ live from its local directory, then from the cache once its writer exits, with
 the same `--media` and `--chain` choices. Runs already shown keep their names; a
 new run named like a shown one appears with part of its run id appended. Runs
 stay shown after they stop matching the selection, and named runs stay as they
-were resolved at startup. A run that starts on another host is usually found
-before its first upload and then stays absent; rerun the command to see it.
+were resolved at startup. A run that starts on another host appears within a
+few seconds of its first upload; one that ends without uploading anything is
+never shown, and the dashboard stops asking for its files.
+
+A selection without run ids or names opens TensorBoard even when nothing
+matches yet, printing that no runs were found yet, and shows runs as they
+appear. With run ids or names, TensorBoard opens when any named run has
+TensorBoard data or is still writing it, as a run on another host is before its
+first upload; otherwise the command reports that no runs were found and exits
+without starting TensorBoard.
+
+On the tracking server's own machine, `--artifact-root` shows runs straight
+from the folder the server stores artifacts in: the folder given to
+`mlflow server --artifacts-destination`. Nothing is downloaded and the cache is
+not used. Each run's scalar files are linked where MLflow keeps them, new
+shards are linked as they reach the folder, and TensorBoard runs with
+`--load_fast=false` so it reads each upload, which the server stores by
+replacing the file. Only scalars, records, text, and HParams are shown, and
+`--media` is refused with this option. A run being written on this host is
+shown from the folder too, not from its local directory. A run whose artifacts
+are stored elsewhere, such as in an experiment with its own artifact location,
+is reported as a warning and left out. A run deleted in MLflow leaves the
+dashboard, but its files stay in the folder until `mlflow gc` removes them;
+deleting a run frees no disk space by itself. TensorBoard follows only a run's
+newest scalar shard here, so if an upload of an older shard fails and lands
+after a newer shard, its last points stay hidden until the command restarts.
 
 During logging, writers flush events to local disk every 10 seconds by default;
 pass `runsnap.tensorboard(flush_secs=60)` to override the interval. The background
