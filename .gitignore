@@ -15,3 +15,6 @@ wheels/
 
 # MLflow local tracking store
 mlruns/
+
+# Tracking server credentials
+.env
