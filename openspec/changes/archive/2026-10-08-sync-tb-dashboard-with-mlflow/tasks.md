@@ -163,6 +163,24 @@ These tasks need VPS access, and the user's explicit go-ahead before pushing to 
   - before running gc by hand, confirm with the user that no deleted run other than a throwaway one exists;
   - then a manual run with `--older-than 0s` removes the throwaway run's folder under `/var/lib/mlflow/artifacts`.
 
+### Deployment record, 2026-10-08
+
+- **8.1:** runsnap 8ad8f5d is installed as a uv tool on the system `python3.12`; `/opt/uv/python` is unused because uv found no need for it. `runsnap tb --help` lists `--artifact-root` and `--path-prefix`.
+- **8.2:** `runsnap-tb.service` is active. It follows design.md and adds `Group=mlflow` and `RestartSec=5` to match `mlflow.service`. `/tb/data/runs` listed `baseline` and `tuned`. Idle, it used 177 MiB.
+- **8.3:** the old Caddyfile is kept at `/etc/caddy/Caddyfile.bak-2026-10-08`. Results:
+  - `/tb/`: 401 without the login, 200 with it.
+  - `/tb`: 302 to `/tb/`. Caddy runs `redir` before `basic_auth`, so the redirect is also answered without the login, and its target still asks for one.
+  - MLflow API and UI: 200 with the login, 401 without it.
+- **8.4:** `smoke-deploy`, 150 steps at 1 step/s, logged from the laptop.
+  - **Appearance and growth:** the run appeared 4.2 s after its first upload. The later uploads were shown 2.1 s, 4.0 s, 4.3 s and 2.4 s after they landed: 30, 60, 90, 120, then 150 points.
+  - **Finish and deletion:** after finishing, the run stayed `FINISHED` with 150 points. It left the dashboard 4.9 s after deletion, and its files stayed in the artifact folder until gc.
+  - **Load:** `runsnap-tb` peaked at 177.4 MiB and used 1.29 s CPU over 208 s, 0.6% of one core. VPS available memory never fell below 807 MiB.
+  - **Cache:** no download cache was created.
+- **8.5:** `mlflow-gc.timer` is listed, with its next run at 00:00 UTC.
+  - **Manual run:** the user agreed to remove all test data. The `vps-smoke` experiment was deleted, and its runs `baseline` and `tuned` left the dashboard about 6 s later.
+  - **gc results:** `mlflow gc --older-than 0s` permanently deleted the 4 test runs and the experiment. It removed every file under `/var/lib/mlflow/artifacts`, but left the empty run folders, which were pruned by hand.
+  - **End state:** the server holds only the empty `Default` experiment.
+
 ## Workflow follow-up
 
 - Archive the change after review, with `/opsx:archive`.
