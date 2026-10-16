@@ -40,7 +40,7 @@
   - the cache is not created.
 
   The other `tb` CLI tests pass.
-- [ ] 2.2 Update the `--artifact-root` paragraph of `README.md`:
+- [x] 2.2 Update the `--artifact-root` paragraph of `README.md`:
   - each run's scalar files are copied into the dashboard's temporary directory, costing disk space equal to the shown runs' scalar data;
   - new and grown files are copied while the run runs and once after it ends;
   - TensorBoard runs with its default loader;
