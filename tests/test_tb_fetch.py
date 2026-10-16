@@ -18,7 +18,12 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 import runsnap
 from runsnap._tags import TAG_CONTINUES, TB_TAG_LOCAL_DIR, TB_TAG_LOCAL_HOST
-from runsnap._tb_fetch import _run_statuses, assemble_logdir, fetch_run
+from runsnap._tb_fetch import (
+    _copy_scalars,
+    _run_statuses,
+    assemble_logdir,
+    fetch_run,
+)
 from runsnap._tensorboard import TensorBoardWriter
 
 LIGHT = "events.out.tfevents.1.host.scalars"
@@ -1724,3 +1729,100 @@ def test_staged_copies_are_never_named_as_event_files(tracking, tmp_path: Path):
     assert seen[0] == set()
     assert all(found <= {f"training/{LIGHT}"} for found in seen)
     assert names == {LIGHT}
+
+
+def failing_copies(unreadable: threading.Event, name: str) -> Callable[..., None]:
+    """A `_copy_scalars` that fails for the run shown as `name` while `unreadable`."""
+
+    def copy(folder: Path, copies: Path) -> None:
+        if unreadable.is_set() and copies.name == name:
+            raise PermissionError("the folder is unreadable")
+        _copy_scalars(folder, copies)
+
+    return copy
+
+
+def test_a_failing_copy_is_warned_once_and_keeps_the_run(tracking, tmp_path: Path):
+    root = tmp_path / "root"
+    flaky, flaky_folder = stored_run(tracking, root, "flaky")
+    steady, steady_folder = stored_run(tracking, root, "steady")
+    for folder in (flaky_folder, steady_folder):
+        (folder / LIGHT).write_bytes(b"scalar events")
+    unreadable = threading.Event()
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        patch(
+            "runsnap._tb_fetch._copy_scalars",
+            side_effect=failing_copies(unreadable, "flaky"),
+        ),
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        with assemble_logdir(
+            tracking,
+            [flaky, steady],
+            cache_dir=tmp_path / "cache",
+            poll_interval=0.02,
+            artifact_root=root,
+        ) as logdir:
+            unreadable.set()
+            for folder in (flaky_folder, steady_folder):
+                upload(folder / LIGHT, b"scalar events and more")
+            assert wait_for_checks(check, 5)
+            assert sorted(p.name for p in logdir.iterdir()) == ["flaky", "steady"]
+            assert (logdir / "steady" / LIGHT).read_bytes() == b"scalar events and more"
+            assert (logdir / "flaky" / LIGHT).read_bytes() == b"scalar events"
+            unreadable.clear()
+            assert wait_until(
+                lambda: (logdir / "flaky" / LIGHT).read_bytes()
+                == b"scalar events and more"
+            )
+            unreadable.set()
+            upload(flaky_folder / LIGHT, b"scalar events and more again")
+            assert wait_for_checks(check, 5)
+            unreadable.clear()
+            assert wait_until(
+                lambda: (logdir / "flaky" / LIGHT).read_bytes()
+                == b"scalar events and more again"
+            )
+
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 2
+    for warning in user_warnings:
+        assert flaky.info.run_id in str(warning.message)
+        assert "the folder is unreadable" in str(warning.message)
+
+
+def test_a_failing_first_copy_keeps_the_run_and_is_retried(tracking, tmp_path: Path):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    (folder / LIGHT).write_bytes(b"scalar events")
+    # An ended run is otherwise never copied again.
+    tracking.set_terminated(run.info.run_id)
+    unreadable = threading.Event()
+    unreadable.set()
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        patch(
+            "runsnap._tb_fetch._copy_scalars",
+            side_effect=failing_copies(unreadable, "training"),
+        ),
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        with assemble_logdir(
+            tracking,
+            [tracking.get_run(run.info.run_id)],
+            cache_dir=tmp_path / "cache",
+            poll_interval=0.02,
+            artifact_root=root,
+        ) as logdir:
+            assert [p.name for p in logdir.iterdir()] == ["training"]
+            assert wait_for_checks(check, 5)
+            unreadable.clear()
+            assert wait_until((logdir / "training" / LIGHT).is_file)
+            assert (logdir / "training" / LIGHT).read_bytes() == b"scalar events"
+
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert run.info.run_id in str(user_warnings[0].message)

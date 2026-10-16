@@ -350,8 +350,9 @@ class _LiveWatch:
 
     With `artifact_root`, a run is linked as a directory of copies of the
     scalar files in its folder there, and a refresh copies the scalar files
-    that appeared or grew since, on the same passes a fetch would run. Nothing
-    is linked live, and removing a run leaves its folder to MLflow.
+    that appeared or grew since, on the same passes a fetch would run. A copy
+    that fails, the first one included, is handled as a failing refresh is.
+    Nothing is linked live, and removing a run leaves its folder to MLflow.
     """
 
     def __init__(
@@ -422,7 +423,10 @@ class _LiveWatch:
                 link.symlink_to(targets[run_id], target_is_directory=True)
             else:
                 link.mkdir()
-                _copy_scalars(targets[run_id], link)
+                if not self._copy(run_id, targets[run_id], link):
+                    # Tried again on the next pass, whatever the run's status.
+                    self._refreshing.add(run_id)
+                    self._refresh_failing.add(run_id)
             self._shown[run_id] = link
             self._handled.add(run_id)
             self._pending.discard(run_id)
@@ -592,14 +596,37 @@ class _LiveWatch:
                 )
             )
         else:
-            for run_id in due:
-                folder = _artifact_folder(self._runs[run_id], self._artifact_root)
-                _copy_scalars(folder, self._shown[run_id])
-            fetched = due
+            fetched = {
+                run_id
+                for run_id in due
+                if self._copy(
+                    run_id,
+                    _artifact_folder(self._runs[run_id], self._artifact_root),
+                    self._shown[run_id],
+                )
+            }
         self._refresh_failing = due - fetched
         # A run fetched after it ended holds its final events.
         self._refreshing |= running
         self._refreshing -= fetched - running
+
+    def _copy(self, run_id: str, folder: Path, link: Path) -> bool:
+        """Update `link`'s copies of the scalar files in `folder`.
+
+        A failure keeps what was copied and is reported as a warning naming
+        `run_id`, unless that run's copies were already failing. Returns
+        whether the copies are current.
+        """
+        try:
+            _copy_scalars(folder, link)
+        except Exception as exc:  # noqa: BLE001 - one unreadable run is not
+            # a reason to stop showing the others.
+            if run_id not in self._refresh_failing:
+                warnings.warn(
+                    f"runsnap could not copy run {run_id}: {exc}", stacklevel=2
+                )
+            return False
+        return True
 
     def _repoint(self, run_id: str, statuses: dict[str, str] | None) -> None:
         link = self._links.pop(run_id)

@@ -15,7 +15,7 @@
   - new: during and after a refresh, no file or folder under the logdir other than the copies has `tfevents` in its name;
   - `test_a_scalar_file_replaced_by_a_longer_copy_shows_its_new_steps` passes, with a pass between the upload and `accumulator.Reload()`;
   - `test_viewing_from_the_artifact_root_neither_lists_nor_downloads_nor_caches` passes unchanged, and the folder's files keep their bytes and inodes.
-- [ ] 1.2 Make a failing copy a per-run failure, as in design.md:
+- [x] 1.2 Make a failing copy a per-run failure, as in design.md:
   - in `_refresh_pass`, a run whose `_copy_scalars` raises warns unless it is in `_refresh_failing`, and is left out of `fetched`;
   - in `link`, such a run stays shown with what was copied, warns once, and is added to `_refreshing` and `_refresh_failing`.
 
