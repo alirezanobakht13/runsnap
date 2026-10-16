@@ -29,7 +29,7 @@
 
 ## 2. The default loader and the docs
 
-- [ ] 2.1 In `src/runsnap/_cli.py`:
+- [x] 2.1 In `src/runsnap/_cli.py`:
   - remove the `load_fast` parameter and its `--load_fast=false` branch from `_launch_tensorboard`;
   - stop passing it from `tb`;
   - drop the comment about the Python loader.

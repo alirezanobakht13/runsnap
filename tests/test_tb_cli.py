@@ -585,11 +585,9 @@ def test_media_and_artifact_root_conflict_before_querying(monkeypatch, capsys):
     client.assert_not_called()
 
 
-def test_artifact_root_shows_runs_from_the_folder_with_the_python_loader(
+def test_artifact_root_shows_copies_from_the_folder_with_the_default_loader(
     tracking, tmp_path, cache, monkeypatch
 ):
-    # Without `--artifact-root`, the forwarding test above finds no
-    # `--load_fast` among the arguments.
     root = tmp_path / "root"
     experiment_id = tracking.create_experiment(
         "stored", artifact_location="mlflow-artifacts:/stored"
@@ -603,19 +601,19 @@ def test_artifact_root_shows_runs_from_the_folder_with_the_python_loader(
     viewed = {}
 
     def run(args, *, check):
-        assert args[5:] == ["--load_fast=false"]
+        assert not any(arg.startswith("--load_fast") for arg in args)
         logdir = Path(args[4])
         viewed.update(
-            (path.relative_to(logdir).as_posix(), path.readlink())
+            (path.relative_to(logdir).as_posix(), path.read_bytes())
             for path in logdir.rglob("*")
-            if path.is_symlink()
+            if path.is_file() and not path.is_symlink()
         )
 
     monkeypatch.setattr(_cli.subprocess, "run", run)
 
     invoke(monkeypatch, "--artifact-root", str(root))
 
-    assert viewed == {f"baseline/{LIGHT}": folder.resolve() / LIGHT}
+    assert viewed == {f"baseline/{LIGHT}": b"scalar events"}
     assert not cache.exists()
 
 
