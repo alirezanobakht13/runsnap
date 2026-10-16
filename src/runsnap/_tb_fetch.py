@@ -33,7 +33,7 @@ LIVE_POLL_SECONDS = 5.0
 """How often shown runs are checked for having been deleted in MLflow, a live
 run's directory for having been removed, a followed selection is re-run for
 runs that have begun writing events, and running runs shown from the cache are
-fetched again, or get links to their new scalar files from an artifact root."""
+fetched again, or have their copies of an artifact root's scalar files updated."""
 
 CHECK_BATCH = 200
 """Run ids checked per search, within SQLite's bound-parameter limits."""
@@ -146,9 +146,10 @@ def assemble_logdir(
 
     With `artifact_root`, the folder a tracking server on this host stores
     proxied artifacts in, every run is shown from its files there instead:
-    its link is a directory holding a link to each of its scalar files, and
-    nothing is downloaded, cached, or shown live. A run stored elsewhere is
-    reported as a warning and left out.
+    its link is a directory holding a copy of each of its scalar files, which
+    only ever grows so TensorBoard's default loader follows it, and nothing is
+    downloaded, cached, or shown live. A run stored elsewhere is reported as a
+    warning and left out.
 
     While the context is open, a thread checks every `poll_interval` seconds
     whether MLflow still holds the shown runs. A run deleted there, directly or
@@ -168,8 +169,8 @@ def assemble_logdir(
     check while MLflow reports it running, and once more after it ends. A run
     shown from the cache is likewise fetched again on every check while MLflow
     reports it running, and once more after it ends, so its curves keep
-    growing; a run shown from `artifact_root` gets links to its new scalar
-    files instead.
+    growing; a run shown from `artifact_root` has its copies updated from its
+    folder instead.
 
     Keep this context open while TensorBoard runs. Its links are removed on
     exit, while downloaded event files remain available for later invocations.
@@ -347,10 +348,10 @@ class _LiveWatch:
 
     A pass whose check failed skips the last two steps.
 
-    With `artifact_root`, a run is linked as a directory of links to the
-    scalar files in its folder there, and a refresh links the scalar files
-    that appeared since, on the same passes a fetch would run. Nothing is
-    linked live, and removing a run leaves its folder to MLflow.
+    With `artifact_root`, a run is linked as a directory of copies of the
+    scalar files in its folder there, and a refresh copies the scalar files
+    that appeared or grew since, on the same passes a fetch would run. Nothing
+    is linked live, and removing a run leaves its folder to MLflow.
     """
 
     def __init__(
@@ -421,7 +422,7 @@ class _LiveWatch:
                 link.symlink_to(targets[run_id], target_is_directory=True)
             else:
                 link.mkdir()
-                _link_scalars(targets[run_id], link)
+                _copy_scalars(targets[run_id], link)
             self._shown[run_id] = link
             self._handled.add(run_id)
             self._pending.discard(run_id)
@@ -513,8 +514,8 @@ class _LiveWatch:
     def _remove(self, run_id: str) -> None:
         """Unlink a run MLflow no longer holds and delete its cached files.
 
-        A run shown from an artifact root loses its directory of links, which
-        are removed without being followed, so its folder is left to MLflow.
+        A run shown from an artifact root loses its directory of copies, and
+        its folder is left to MLflow.
         """
         link = self._shown.pop(run_id, None)
         if self._artifact_root is not None:
@@ -576,7 +577,7 @@ class _LiveWatch:
         Those are the runs `statuses` reports running, and the runs last
         fetched while running or whose last refresh failed. A run reported
         ended is not fetched again once this fetch succeeds. With an artifact
-        root, those runs get links to their new scalar files instead.
+        root, those runs have their copies updated from their folders instead.
         """
         running = {run_id for run_id in cached if statuses[run_id] == "RUNNING"}
         due = running | (self._refreshing & cached)
@@ -593,7 +594,7 @@ class _LiveWatch:
         else:
             for run_id in due:
                 folder = _artifact_folder(self._runs[run_id], self._artifact_root)
-                _link_scalars(folder, self._shown[run_id])
+                _copy_scalars(folder, self._shown[run_id])
             fetched = due
         self._refresh_failing = due - fetched
         # A run fetched after it ended holds its final events.
@@ -691,17 +692,26 @@ def _scalar_files(folder: Path) -> Iterator[Path]:
     )
 
 
-def _link_scalars(folder: Path, links: Path) -> None:
-    """Link each scalar file under `folder` that `links` lacks, mirroring subfolders.
+def _copy_scalars(folder: Path, copies: Path) -> None:
+    """Copy each scalar file under `folder` into `copies`, mirroring subfolders.
 
-    The links name the files, so a file the tracking server replaces with a
-    longer copy is read through the same link.
+    The tracking server stores each upload by moving a longer copy over the
+    file, which TensorBoard's default loader does not follow, so a copy whose
+    file has grown gains only the new bytes instead, as a cached file does. A
+    file no longer than its copy is skipped.
     """
     for path in _scalar_files(folder):
-        link = links / path.relative_to(folder)
-        if not link.is_symlink():
-            link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(path)
+        copy = copies / path.relative_to(folder)
+        held = copy.stat().st_size if copy.is_file() else -1
+        if path.stat().st_size > held:
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            # Staged on the copy's filesystem, so moving it into place is
+            # atomic, under a name TensorBoard does not read as events, and as
+            # a copy, since `_extend_or_replace` may move what it is given.
+            with TemporaryDirectory(prefix=".copy-", dir=copy.parent) as tmp:
+                staged = Path(tmp) / "staged"
+                shutil.copyfile(path, staged)
+                _extend_or_replace(copy, staged)
 
 
 def _run_name(run: Run) -> str:

@@ -1,6 +1,6 @@
 ## 1. Copies instead of links under `--artifact-root`
 
-- [ ] 1.1 Replace `_link_scalars` with `_copy_scalars(folder, copies)` in `src/runsnap/_tb_fetch.py`, as in design.md:
+- [x] 1.1 Replace `_link_scalars` with `_copy_scalars(folder, copies)` in `src/runsnap/_tb_fetch.py`, as in design.md:
   - a missing copy: stage, then move into place;
   - a larger source: stage, then `_extend_or_replace`;
   - an equal or smaller source: skip.
