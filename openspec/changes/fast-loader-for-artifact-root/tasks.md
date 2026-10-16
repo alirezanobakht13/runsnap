@@ -73,15 +73,27 @@
 
 These tasks need VPS access and the user's explicit go-ahead before pushing to GitHub.
 
-- [ ] 4.1 After the user approves the push, push the commits and run `./vps.sh update <commit>`. Verify that:
+- [x] 4.1 After the user approves the push, push the commits and run `./vps.sh update <commit>`. Verify that:
   - `systemctl is-active runsnap-tb` is `active`, and `mlflow` was not restarted (its `ActiveEnterTimestamp` is unchanged);
   - the service's command line has no `--load_fast`, and a `tensorboard_data_server` process is running.
-- [ ] 4.2 Once the dashboard has loaded, record in this file:
+- [x] 4.2 Once the dashboard has loaded, record in this file:
   - `./vps.sh status`: the service's RAM and swap, and available memory;
   - the time for `/tb/data/plugin/scalars/tags`;
   - how long a running run's new upload takes to appear.
 
   Verify that memory settles below 1 GiB with no swap growth (`vmstat` `si`/`so` near 0), and the tag list responds within 1 s.
+
+### Deployment record, 2026-10-16
+
+- **4.1:**
+  - **Install:** runsnap 690209e was installed from the pushed branch at 14:56 UTC.
+  - **MLflow:** kept PID 49078 and its 2026-10-10 start time.
+  - **Dashboard:** the service runs without `--load_fast`, beside `tensorboard_data_server`. Its folder held 51 runs as 185 copied scalar files (159 MB) and no links.
+- **4.2:** 51 runs, 8,541 tags, 13 of them running.
+  - **Memory:** the service settled at 829 MiB with no swap, against 1.2 GiB of RAM plus 2.4 GiB of swap before the update. Of that, 367 MiB is process memory: about 180 MiB for runsnap, 90 for TensorBoard, and 190 for its data server, measured as resident sizes, which include shared libraries. The other 449 MiB is reclaimable file cache: the copies and libraries.
+  - **Host:** available memory was 842 MiB, against 194 MiB in the morning. `vmstat` showed `si` at 0–10 KB/s, `so` at 0, and no I/O wait.
+  - **Tag list:** `/tb/data/plugin/scalars/tags` took 0.43 s, then 0.32 s, against 19.5 s before.
+  - **Live updates:** a running run's upload of 11,796 bytes showed new points 2.0 s after it landed in the artifact folder.
 
 ## Workflow follow-up
 
