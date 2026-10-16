@@ -51,7 +51,7 @@
 
 ## 3. Integration checks
 
-- [ ] 3.1 Exercise the change on real data, outside the repo:
+- [x] 3.1 Exercise the change on real data, outside the repo:
   - create runs in a scratch SQLite tracking store, in an experiment with an `mlflow-artifacts:` artifact location;
   - place a copy of the VPS's scalar files under a scratch artifact root, at those runs' folders;
   - run `runsnap tb --artifact-root <scratch root>`.
@@ -60,7 +60,14 @@
   - TensorBoard lists every run within 30 s;
   - the dashboard process tree settles well below 1 GiB;
   - appending events to a source shard by moving a longer copy over it shows the new points within a few passes.
-- [ ] 3.2 Run `uv run ruff check`, `uv run ruff format --check`, `uv run ty check` and `uv run pytest`; verify all pass.
+
+  **Result, 2026-10-16:**
+  - **Setup:** the 48 runs of the VPS's scalar data plus one running run, in a scratch SQLite store.
+  - **Load:** every run was listed after 6 s, and the tag list (7,818 tags) took 0.23 s.
+  - **Memory:** the whole process tree (runsnap, TensorBoard, and its data server) settled at 664 MiB.
+  - **Growth:** moving a longer copy over the running run's shard took it from 10 to 20 points, shown 6.1 s after the move.
+  - **The root:** no file in it was changed by the dashboard.
+- [x] 3.2 Run `uv run ruff check`, `uv run ruff format --check`, `uv run ty check` and `uv run pytest`; verify all pass.
 
 ## 4. Deploy on the VPS
 

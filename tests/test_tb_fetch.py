@@ -1689,8 +1689,10 @@ def test_an_earlier_shard_that_grows_after_a_later_one_is_extended(
         assert wait_until((link / LIGHT_SHARDS[1]).exists)
         upload(folder / LIGHT_SHARDS[0], b"first shard and its last steps")
         assert wait_until(
-            lambda: (link / LIGHT_SHARDS[0]).read_bytes()
-            == b"first shard and its last steps"
+            lambda: (
+                (link / LIGHT_SHARDS[0]).read_bytes()
+                == b"first shard and its last steps"
+            )
         )
 
 
@@ -1774,16 +1776,19 @@ def test_a_failing_copy_is_warned_once_and_keeps_the_run(tracking, tmp_path: Pat
             assert (logdir / "flaky" / LIGHT).read_bytes() == b"scalar events"
             unreadable.clear()
             assert wait_until(
-                lambda: (logdir / "flaky" / LIGHT).read_bytes()
-                == b"scalar events and more"
+                lambda: (
+                    (logdir / "flaky" / LIGHT).read_bytes() == b"scalar events and more"
+                )
             )
             unreadable.set()
             upload(flaky_folder / LIGHT, b"scalar events and more again")
             assert wait_for_checks(check, 5)
             unreadable.clear()
             assert wait_until(
-                lambda: (logdir / "flaky" / LIGHT).read_bytes()
-                == b"scalar events and more again"
+                lambda: (
+                    (logdir / "flaky" / LIGHT).read_bytes()
+                    == b"scalar events and more again"
+                )
             )
 
     user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
