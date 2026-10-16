@@ -242,15 +242,8 @@ def tb(
                 print("No runs found with TensorBoard data matching the selection.")
                 return
             print("No runs found with TensorBoard data yet; waiting for them.")
-        # The Python loader re-opens files by name, so it reads the longer
-        # copies the tracking server moves over them.
         _launch_tensorboard(
-            logdir,
-            bind_all=bind_all,
-            port=port,
-            host=host,
-            path_prefix=path_prefix,
-            load_fast=artifact_root is None,
+            logdir, bind_all=bind_all, port=port, host=host, path_prefix=path_prefix
         )
 
 
@@ -261,7 +254,6 @@ def _launch_tensorboard(
     port: int | Literal["default"] | None = None,
     host: str | None = None,
     path_prefix: str | None = None,
-    load_fast: bool = True,
 ) -> None:
     if find_spec("tensorboard") is None:
         raise CliError("TensorBoard is required; install it with `uv add tensorboard`.")
@@ -274,8 +266,6 @@ def _launch_tensorboard(
         args.extend(["--host", host])
     if path_prefix is not None:
         args.extend(["--path_prefix", path_prefix])
-    if not load_fast:
-        args.append("--load_fast=false")
     try:
         subprocess.run(args, check=True)
     except KeyboardInterrupt:

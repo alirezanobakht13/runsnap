@@ -219,19 +219,22 @@ without starting TensorBoard.
 
 On the tracking server's own machine, `--artifact-root` shows runs straight
 from the folder the server stores artifacts in: the folder given to
-`mlflow server --artifacts-destination`. Nothing is downloaded and the cache is
-not used. Each run's scalar files are linked where MLflow keeps them, new
-shards are linked as they reach the folder, and TensorBoard runs with
-`--load_fast=false` so it reads each upload, which the server stores by
-replacing the file. Only scalars, records, text, and HParams are shown, and
-`--media` is refused with this option. A run being written on this host is
-shown from the folder too, not from its local directory. A run whose artifacts
-are stored elsewhere, such as in an experiment with its own artifact location,
-is reported as a warning and left out. A run deleted in MLflow leaves the
-dashboard, but its files stay in the folder until `mlflow gc` removes them;
-deleting a run frees no disk space by itself. TensorBoard follows only a run's
-newest scalar shard here, so if an upload of an older shard fails and lands
-after a newer shard, its last points stay hidden until the command restarts.
+`mlflow server --artifacts-destination`. Nothing is downloaded, the cache is
+not used, and nothing in the folder is changed. Each run's scalar files are
+copied into the dashboard's temporary directory, which takes as much disk
+space as the shown runs' scalar data and is removed on exit. While MLflow
+reports a run running, and once more after it ends, new shards are copied and
+a grown file adds only its new bytes to its copy, so TensorBoard's default
+loader follows each upload even though the server stores it by replacing the
+file. Only scalars, records, text, and HParams are shown, and `--media` is
+refused with this option. A run being written on this host is shown from the
+folder too, not from its local directory. A run whose artifacts are stored
+elsewhere, such as in an experiment with its own artifact location, is
+reported as a warning and left out. A run whose files cannot be read is
+reported once while that lasts, keeps the data it had, and is tried again
+every few seconds. A run deleted in MLflow leaves the dashboard and its copies
+are removed, but its files stay in the folder until `mlflow gc` removes them;
+deleting a run frees no disk space by itself.
 
 During logging, writers flush events to local disk every 10 seconds by default;
 pass `runsnap.tensorboard(flush_secs=60)` to override the interval. The background

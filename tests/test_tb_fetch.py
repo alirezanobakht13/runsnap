@@ -18,7 +18,12 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 import runsnap
 from runsnap._tags import TAG_CONTINUES, TB_TAG_LOCAL_DIR, TB_TAG_LOCAL_HOST
-from runsnap._tb_fetch import _run_statuses, assemble_logdir, fetch_run
+from runsnap._tb_fetch import (
+    _copy_scalars,
+    _run_statuses,
+    assemble_logdir,
+    fetch_run,
+)
 from runsnap._tensorboard import TensorBoardWriter
 
 LIGHT = "events.out.tfevents.1.host.scalars"
@@ -1346,7 +1351,7 @@ def stored_run(client: MlflowClient, root: Path, name: str) -> tuple[Run, Path]:
     return client.get_run(run_id), folder
 
 
-def test_a_stored_run_is_linked_from_its_folder_under_the_artifact_root(
+def test_a_stored_run_is_copied_from_its_folder_under_the_artifact_root(
     tracking, tmp_path: Path
 ):
     root = tmp_path / "root"
@@ -1358,7 +1363,7 @@ def test_a_stored_run_is_linked_from_its_folder_under_the_artifact_root(
         link = logdir / "training"
         assert link.is_dir()
         assert not link.is_symlink()
-        assert (link / LIGHT).readlink() == folder.resolve() / LIGHT
+        assert not (link / LIGHT).is_symlink()
         assert (link / LIGHT).read_bytes() == b"stored scalar events"
 
 
@@ -1421,6 +1426,7 @@ def test_viewing_from_the_artifact_root_neither_lists_nor_downloads_nor_caches(
     root = tmp_path / "root"
     shown, folder = stored_run(tracking, root, "training")
     (folder / LIGHT).write_bytes(b"stored scalar events")
+    inode = (folder / LIGHT).stat().st_ino
     starting, _ = stored_run(tracking, root, "starting")
     cache = tmp_path / "cache"
     with (
@@ -1447,9 +1453,11 @@ def test_viewing_from_the_artifact_root_neither_lists_nor_downloads_nor_caches(
     listing.assert_not_called()
     download.assert_not_called()
     assert not cache.exists()
+    assert (folder / LIGHT).read_bytes() == b"stored scalar events"
+    assert (folder / LIGHT).stat().st_ino == inode
 
 
-def test_only_scalar_files_are_linked_from_the_artifact_root(tracking, tmp_path: Path):
+def test_only_scalar_files_are_copied_from_the_artifact_root(tracking, tmp_path: Path):
     root = tmp_path / "root"
     run, folder = stored_run(tracking, root, "training")
     nested = folder / "nested"
@@ -1468,12 +1476,12 @@ def test_only_scalar_files_are_linked_from_the_artifact_root(tracking, tmp_path:
             f"nested/{LIGHT_SHARDS[0]}",
         }
         assert not entries["nested"].is_symlink()
-        assert entries[f"nested/{LIGHT_SHARDS[0]}"].readlink() == (
-            nested.resolve() / LIGHT_SHARDS[0]
-        )
+        copy = entries[f"nested/{LIGHT_SHARDS[0]}"]
+        assert not copy.is_symlink()
+        assert copy.read_bytes() == b"scalar events"
 
 
-def test_a_new_scalar_shard_in_the_artifact_root_is_linked(tracking, tmp_path: Path):
+def test_a_new_scalar_shard_in_the_artifact_root_is_copied(tracking, tmp_path: Path):
     root = tmp_path / "root"
     run, folder = stored_run(tracking, root, "training")
     with assemble_logdir(
@@ -1493,7 +1501,7 @@ def test_a_new_scalar_shard_in_the_artifact_root_is_linked(tracking, tmp_path: P
         assert (link / LIGHT_SHARDS[1]).read_bytes() == b"second shard"
 
 
-def test_a_run_that_ends_gets_its_last_shard_linked_and_no_more(
+def test_a_run_that_ends_gets_its_last_shard_copied_and_no_more(
     tracking, tmp_path: Path
 ):
     root = tmp_path / "root"
@@ -1527,7 +1535,7 @@ def test_a_run_that_ends_gets_its_last_shard_linked_and_no_more(
         (folder / late).write_bytes(b"too late")
         done = checks
         assert wait_until(lambda: checks >= done + 10)
-        assert not (link / late).is_symlink()
+        assert not (link / late).exists()
 
 
 def test_a_scalar_file_replaced_by_a_longer_copy_shows_its_new_steps(
@@ -1542,7 +1550,11 @@ def test_a_scalar_file_replaced_by_a_longer_copy_shows_its_new_steps(
     stored = folder / writer.light_path.name
     shutil.copy(writer.light_path, stored)
     with assemble_logdir(
-        tracking, [run], cache_dir=tmp_path / "cache", artifact_root=root
+        tracking,
+        [run],
+        cache_dir=tmp_path / "cache",
+        poll_interval=0.02,
+        artifact_root=root,
     ) as logdir:
         accumulator = EventAccumulator(str(logdir / "training"))
         accumulator.Reload()
@@ -1553,11 +1565,13 @@ def test_a_scalar_file_replaced_by_a_longer_copy_shows_its_new_steps(
         upload = tmp_path / "upload"
         shutil.copy(writer.light_path, upload)
         upload.replace(stored)
+        copy = logdir / "training" / stored.name
+        assert wait_until(lambda: copy.read_bytes() == stored.read_bytes())
         accumulator.Reload()
         assert [point.step for point in accumulator.Scalars("loss")] == [1, 2]
 
 
-def test_a_run_live_on_this_host_is_linked_from_the_artifact_root(
+def test_a_run_live_on_this_host_is_copied_from_the_artifact_root(
     tracking, tmp_path: Path
 ):
     root = tmp_path / "root"
@@ -1572,9 +1586,9 @@ def test_a_run_live_on_this_host_is_linked_from_the_artifact_root(
     with assemble_logdir(
         tracking, [run], cache_dir=tmp_path / "cache", artifact_root=root
     ) as logdir:
-        link = logdir / "training" / LIGHT
-        assert link.readlink() == folder.resolve() / LIGHT
-        assert link.read_bytes() == b"stored scalar events"
+        copy = logdir / "training" / LIGHT
+        assert not copy.is_symlink()
+        assert copy.read_bytes() == b"stored scalar events"
 
 
 def test_a_deleted_run_leaves_its_files_in_the_artifact_root(tracking, tmp_path: Path):
@@ -1597,13 +1611,223 @@ def test_a_deleted_run_leaves_its_files_in_the_artifact_root(tracking, tmp_path:
         artifact_root=root,
     ) as logdir:
         link = logdir / "deleted"
-        assert (link / "nested" / LIGHT).is_symlink()
+        assert (link / "nested" / LIGHT).is_file()
         tracking.delete_run(deleted.info.run_id)
         assert wait_until(lambda: not link.exists())
         assert [p.name for p in logdir.iterdir()] == ["kept"]
         assert (folder / LIGHT).read_bytes() == b"stored scalar events"
         assert (folder / "nested" / LIGHT).read_bytes() == b"nested scalar events"
         tracking.restore_run(deleted.info.run_id)
-        assert wait_until((link / "nested" / LIGHT).is_symlink)
+        assert wait_until((link / "nested" / LIGHT).is_file)
     assert (folder / LIGHT).read_bytes() == b"stored scalar events"
     assert cached.read_bytes() == b"scalar events"
+
+
+def upload(stored: Path, content: bytes) -> None:
+    """Store `content` at `stored` as the tracking server stores an upload."""
+    staged = stored.with_name("upload")
+    staged.write_bytes(content)
+    staged.replace(stored)
+
+
+def test_a_grown_file_in_the_artifact_root_extends_its_copy_in_place(
+    tracking, tmp_path: Path
+):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    (folder / LIGHT).write_bytes(b"scalar events")
+    with assemble_logdir(
+        tracking,
+        [run],
+        cache_dir=tmp_path / "cache",
+        poll_interval=0.02,
+        artifact_root=root,
+    ) as logdir:
+        copy = logdir / "training" / LIGHT
+        inode = copy.stat().st_ino
+        upload(folder / LIGHT, b"scalar events and another step")
+        assert wait_until(
+            lambda: copy.read_bytes() == b"scalar events and another step"
+        )
+        assert copy.stat().st_ino == inode
+
+
+def test_a_shorter_file_in_the_artifact_root_leaves_its_copy(tracking, tmp_path: Path):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    (folder / LIGHT).write_bytes(b"scalar events")
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        assemble_logdir(
+            tracking,
+            [run],
+            cache_dir=tmp_path / "cache",
+            poll_interval=0.02,
+            artifact_root=root,
+        ) as logdir,
+    ):
+        upload(folder / LIGHT, b"scalar")
+        assert wait_for_checks(check, 5)
+        assert (logdir / "training" / LIGHT).read_bytes() == b"scalar events"
+
+
+def test_an_earlier_shard_that_grows_after_a_later_one_is_extended(
+    tracking, tmp_path: Path
+):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    (folder / LIGHT_SHARDS[0]).write_bytes(b"first shard")
+    with assemble_logdir(
+        tracking,
+        [run],
+        cache_dir=tmp_path / "cache",
+        poll_interval=0.02,
+        artifact_root=root,
+    ) as logdir:
+        link = logdir / "training"
+        (folder / LIGHT_SHARDS[1]).write_bytes(b"second shard")
+        assert wait_until((link / LIGHT_SHARDS[1]).exists)
+        upload(folder / LIGHT_SHARDS[0], b"first shard and its last steps")
+        assert wait_until(
+            lambda: (
+                (link / LIGHT_SHARDS[0]).read_bytes()
+                == b"first shard and its last steps"
+            )
+        )
+
+
+def test_staged_copies_are_never_named_as_event_files(tracking, tmp_path: Path):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    (folder / LIGHT).write_bytes(b"scalar events")
+    copyfile = shutil.copyfile
+    seen: list[set[str]] = []
+
+    def staging(source: Path, staged: Path) -> Path:
+        result = copyfile(source, staged)
+        logdir = Path(staged).parents[2]
+        seen.append(
+            {
+                p.relative_to(logdir).as_posix()
+                for p in logdir.rglob("*")
+                if "tfevents" in p.name
+            }
+        )
+        return result
+
+    with (
+        patch("runsnap._tb_fetch.shutil.copyfile", side_effect=staging),
+        assemble_logdir(
+            tracking,
+            [run],
+            cache_dir=tmp_path / "cache",
+            poll_interval=0.02,
+            artifact_root=root,
+        ) as logdir,
+    ):
+        upload(folder / LIGHT, b"scalar events and another step")
+        assert wait_until(lambda: len(seen) >= 2)
+        names = {p.name for p in logdir.rglob("*") if "tfevents" in p.name}
+    assert seen[0] == set()
+    assert all(found <= {f"training/{LIGHT}"} for found in seen)
+    assert names == {LIGHT}
+
+
+def failing_copies(unreadable: threading.Event, name: str) -> Callable[..., None]:
+    """A `_copy_scalars` that fails for the run shown as `name` while `unreadable`."""
+
+    def copy(folder: Path, copies: Path) -> None:
+        if unreadable.is_set() and copies.name == name:
+            raise PermissionError("the folder is unreadable")
+        _copy_scalars(folder, copies)
+
+    return copy
+
+
+def test_a_failing_copy_is_warned_once_and_keeps_the_run(tracking, tmp_path: Path):
+    root = tmp_path / "root"
+    flaky, flaky_folder = stored_run(tracking, root, "flaky")
+    steady, steady_folder = stored_run(tracking, root, "steady")
+    for folder in (flaky_folder, steady_folder):
+        (folder / LIGHT).write_bytes(b"scalar events")
+    unreadable = threading.Event()
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        patch(
+            "runsnap._tb_fetch._copy_scalars",
+            side_effect=failing_copies(unreadable, "flaky"),
+        ),
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        with assemble_logdir(
+            tracking,
+            [flaky, steady],
+            cache_dir=tmp_path / "cache",
+            poll_interval=0.02,
+            artifact_root=root,
+        ) as logdir:
+            unreadable.set()
+            for folder in (flaky_folder, steady_folder):
+                upload(folder / LIGHT, b"scalar events and more")
+            assert wait_for_checks(check, 5)
+            assert sorted(p.name for p in logdir.iterdir()) == ["flaky", "steady"]
+            assert (logdir / "steady" / LIGHT).read_bytes() == b"scalar events and more"
+            assert (logdir / "flaky" / LIGHT).read_bytes() == b"scalar events"
+            unreadable.clear()
+            assert wait_until(
+                lambda: (
+                    (logdir / "flaky" / LIGHT).read_bytes() == b"scalar events and more"
+                )
+            )
+            unreadable.set()
+            upload(flaky_folder / LIGHT, b"scalar events and more again")
+            assert wait_for_checks(check, 5)
+            unreadable.clear()
+            assert wait_until(
+                lambda: (
+                    (logdir / "flaky" / LIGHT).read_bytes()
+                    == b"scalar events and more again"
+                )
+            )
+
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 2
+    for warning in user_warnings:
+        assert flaky.info.run_id in str(warning.message)
+        assert "the folder is unreadable" in str(warning.message)
+
+
+def test_a_failing_first_copy_keeps_the_run_and_is_retried(tracking, tmp_path: Path):
+    root = tmp_path / "root"
+    run, folder = stored_run(tracking, root, "training")
+    (folder / LIGHT).write_bytes(b"scalar events")
+    # An ended run is otherwise never copied again.
+    tracking.set_terminated(run.info.run_id)
+    unreadable = threading.Event()
+    unreadable.set()
+    with (
+        patch("runsnap._tb_fetch._run_statuses", wraps=_run_statuses) as check,
+        patch(
+            "runsnap._tb_fetch._copy_scalars",
+            side_effect=failing_copies(unreadable, "training"),
+        ),
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        with assemble_logdir(
+            tracking,
+            [tracking.get_run(run.info.run_id)],
+            cache_dir=tmp_path / "cache",
+            poll_interval=0.02,
+            artifact_root=root,
+        ) as logdir:
+            assert [p.name for p in logdir.iterdir()] == ["training"]
+            assert wait_for_checks(check, 5)
+            unreadable.clear()
+            assert wait_until((logdir / "training" / LIGHT).is_file)
+            assert (logdir / "training" / LIGHT).read_bytes() == b"scalar events"
+
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert run.info.run_id in str(user_warnings[0].message)
